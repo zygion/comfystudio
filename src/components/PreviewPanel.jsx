@@ -1,10 +1,152 @@
-import { Maximize2, Minimize2, Plus, X, Check, Home, ZoomIn, ZoomOut, Move, Play, Pause, SkipBack, SkipForward, Volume2, Film, Image as ImageIcon, ChevronDown, Grid3X3, Crosshair, Square, Frame } from 'lucide-react'
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { Maximize2, Minimize2, Plus, X, Check, Home, ZoomIn, ZoomOut, Move, Play, Pause, SkipBack, SkipForward, Volume2, Film, Image as ImageIcon, ChevronDown, Grid3X3, Crosshair, Square, Frame, Eye, EyeOff, Layers } from 'lucide-react'
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import useAssetsStore from '../stores/assetsStore'
 import useTimelineStore from '../stores/timelineStore'
 import useProjectStore from '../stores/projectStore'
 import { useTimelinePlayback } from '../hooks/useTimelinePlayback'
 import VideoLayerRenderer from './VideoLayerRenderer'
+
+/**
+ * MaskPreview - Component for previewing mask assets with frame-by-frame playback
+ * Supports both single-frame masks and multi-frame (video) masks
+ */
+function MaskPreview({ mask, isPlaying, currentFrame, onFrameChange, onDurationSet, onTimeUpdate, onEnded }) {
+  const [loadedFrames, setLoadedFrames] = useState({})
+  const animationRef = useRef(null)
+  const lastFrameTime = useRef(performance.now())
+  const lastReportedDuration = useRef(null)
+  const lastReportedTime = useRef(null)
+  
+  // Default to 24fps for mask playback
+  const fps = 24
+  const frameInterval = 1000 / fps
+  
+  // Get the frames array or create a single-frame array
+  const frames = useMemo(() => {
+    if (mask.maskFrames && mask.maskFrames.length > 0) {
+      return mask.maskFrames
+    }
+    // Single frame mask
+    return [{ url: mask.url, filename: 'frame_0' }]
+  }, [mask])
+  
+  const totalFrames = frames.length
+  const duration = totalFrames / fps
+  
+  // Report duration to parent (in seconds) - only when it changes
+  useEffect(() => {
+    if (onDurationSet && totalFrames > 0 && lastReportedDuration.current !== duration) {
+      lastReportedDuration.current = duration
+      onDurationSet(duration)
+    }
+  }, [totalFrames, duration, onDurationSet])
+  
+  // Report time updates when frame changes - only when it changes
+  useEffect(() => {
+    const currentTime = currentFrame / fps
+    if (onTimeUpdate && lastReportedTime.current !== currentTime) {
+      lastReportedTime.current = currentTime
+      onTimeUpdate(currentTime)
+    }
+  }, [currentFrame, fps, onTimeUpdate])
+  
+  // Preload all frames
+  useEffect(() => {
+    frames.forEach((frame, index) => {
+      if (frame.url && !loadedFrames[index]) {
+        const img = new Image()
+        img.onload = () => {
+          setLoadedFrames(prev => ({ ...prev, [index]: true }))
+        }
+        img.src = frame.url
+      }
+    })
+  }, [frames, loadedFrames])
+  
+  // Playback animation loop
+  useEffect(() => {
+    if (!isPlaying || totalFrames <= 1) {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current)
+        animationRef.current = null
+      }
+      return
+    }
+    
+    const animate = () => {
+      const now = performance.now()
+      const elapsed = now - lastFrameTime.current
+      
+      if (elapsed >= frameInterval) {
+        lastFrameTime.current = now - (elapsed % frameInterval)
+        
+        // Advance frame (stop at end instead of looping)
+        const nextFrame = currentFrame + 1
+        if (nextFrame >= totalFrames) {
+          // End of mask - stop playing
+          cancelAnimationFrame(animationRef.current)
+          animationRef.current = null
+          if (onEnded) onEnded()
+          return
+        }
+        onFrameChange(nextFrame)
+      }
+      
+      animationRef.current = requestAnimationFrame(animate)
+    }
+    
+    lastFrameTime.current = performance.now()
+    animationRef.current = requestAnimationFrame(animate)
+    
+    return () => {
+      if (animationRef.current) {
+        cancelAnimationFrame(animationRef.current)
+      }
+    }
+  }, [isPlaying, currentFrame, totalFrames, frameInterval, onFrameChange])
+  
+  // Get current frame URL
+  const currentFrameUrl = frames[currentFrame]?.url || mask.url
+  
+  return (
+    <div 
+      className="w-full h-full flex items-center justify-center"
+      style={{
+        /* Checkered background pattern for transparency visualization */
+        backgroundImage: `
+          linear-gradient(45deg, #333 25%, transparent 25%),
+          linear-gradient(-45deg, #333 25%, transparent 25%),
+          linear-gradient(45deg, transparent 75%, #333 75%),
+          linear-gradient(-45deg, transparent 75%, #333 75%)
+        `,
+        backgroundSize: '20px 20px',
+        backgroundPosition: '0 0, 0 10px, 10px -10px, -10px 0px',
+        backgroundColor: '#222',
+      }}
+    >
+      <img
+        src={currentFrameUrl}
+        alt={`${mask.name} - Frame ${currentFrame + 1}/${totalFrames}`}
+        className="max-w-full max-h-full"
+        style={{
+          display: 'block',
+          objectFit: 'contain',
+        }}
+        onContextMenu={(e) => e.preventDefault()}
+        onError={(e) => {
+          console.error('Mask frame load error:', e)
+        }}
+      />
+      
+      {/* Frame counter overlay for multi-frame masks */}
+      {totalFrames > 1 && (
+        <div className="absolute bottom-2 left-2 px-2 py-1 bg-black/70 rounded text-xs text-white">
+          Frame {currentFrame + 1} / {totalFrames}
+        </div>
+      )}
+    </div>
+  )
+}
 
 // Zoom presets
 const ZOOM_PRESETS = [
@@ -51,6 +193,10 @@ function PreviewPanel() {
   
   // Context menu state
   const [contextMenu, setContextMenu] = useState(null) // { x, y }
+  
+  // Mask preview state (for multi-frame mask playback)
+  const [maskFrame, setMaskFrame] = useState(0)
+  const [maskDuration, setMaskDuration] = useState(0)
 
   // Get current preview and playback state from assets store
   const { 
@@ -187,19 +333,45 @@ function PreviewPanel() {
   const [letterbox, setLetterbox] = useState('none')
   const [showGuidesDropdown, setShowGuidesDropdown] = useState(false)
   
+  // Info overlay visibility (load from localStorage, default to true)
+  const [showInfoOverlay, setShowInfoOverlay] = useState(() => {
+    const saved = localStorage.getItem('previewShowInfoOverlay')
+    return saved !== null ? JSON.parse(saved) : true
+  })
+  
+  // Persist info overlay preference
+  useEffect(() => {
+    localStorage.setItem('previewShowInfoOverlay', JSON.stringify(showInfoOverlay))
+  }, [showInfoOverlay])
+  
   // Get timeline-specific settings
   const { getCurrentTimelineSettings, getCurrentTimeline } = useProjectStore()
   const timelineSettings = getCurrentTimelineSettings()
   const currentTimeline = getCurrentTimeline()
   
-  // Register video ref with store (for asset preview mode)
+  // Register video ref with store (for asset preview mode - only for video assets)
+  // Use a timeout to ensure the video element is mounted after switching previews
   useEffect(() => {
-    if (videoRefA.current && previewMode === 'asset') {
-      registerVideoRef(videoRefA.current)
-      videoRefA.current.volume = volume
+    // Only register video ref for video assets (not masks or images)
+    const isVideoAsset = currentPreview && currentPreview.type !== 'mask' && currentPreview.type !== 'image'
+    
+    if (previewMode === 'asset' && isVideoAsset) {
+      // Use a small timeout to ensure video element is mounted after state change
+      const timeoutId = setTimeout(() => {
+        if (videoRefA.current) {
+          registerVideoRef(videoRefA.current)
+          videoRefA.current.volume = volume
+        }
+      }, 0)
+      return () => {
+        clearTimeout(timeoutId)
+        registerVideoRef(null)
+      }
+    } else {
+      // Clear ref for non-video assets so togglePlay knows to handle them differently
+      registerVideoRef(null)
     }
-    return () => registerVideoRef(null)
-  }, [registerVideoRef, volume, previewMode])
+  }, [registerVideoRef, volume, previewMode, currentPreview])
 
   // Get all active video clips at current playhead position (for overlay display only)
   useEffect(() => {
@@ -374,16 +546,17 @@ function PreviewPanel() {
   const handleLoadedMetadata = () => {
     if (videoRefA.current && previewMode === 'asset') {
       setAssetDuration(videoRefA.current.duration)
+      // Register the video ref now that it's loaded and ready
+      registerVideoRef(videoRefA.current)
+      videoRefA.current.volume = volume
     }
   }
 
-  // Handle video end (asset mode)
+  // Handle video end (asset mode) - stop at end, don't loop
   const handleEnded = () => {
     if (previewMode === 'asset') {
       setAssetIsPlaying(false)
-      if (videoRefA.current) {
-        videoRefA.current.currentTime = 0
-      }
+      // Don't reset to 0, stay at the end so user can see final frame
     }
   }
 
@@ -401,18 +574,60 @@ function PreviewPanel() {
     ? (clips.length > 0)
     : (currentPreview !== null)
 
-  // Auto-play when new preview is set (asset mode only)
+  // When a new asset preview is set, reset video to start and pause
+  // (DaVinci Resolve behavior - asset selected shows at start, paused)
   useEffect(() => {
-    if (currentPreview && videoRefA.current && previewMode === 'asset') {
-      videoRefA.current.play().catch(() => {
-        // Autoplay might be blocked
-      })
-      setAssetIsPlaying(true)
+    if (currentPreview && previewMode === 'asset') {
+      // Reset mask frame for mask previews
+      if (currentPreview.type === 'mask') {
+        setMaskFrame(0)
+        setAssetIsPlaying(false)
+        setAssetCurrentTime(0)
+      } else if (videoRefA.current) {
+        // Reset to start, paused - user controls playback
+        videoRefA.current.pause()
+        videoRefA.current.currentTime = 0
+        setAssetIsPlaying(false)
+        setAssetCurrentTime(0)
+      }
     }
     // Reset zoom/pan when preview changes
     setZoom('fit')
     setPan({ x: 0, y: 0 })
-  }, [currentPreview, setAssetIsPlaying, previewMode])
+  }, [currentPreview, setAssetIsPlaying, setAssetCurrentTime, previewMode])
+  
+  // Ref to track if we're updating mask time internally
+  const maskTimeUpdateRef = useRef(false)
+  
+  // Sync mask frame when assetCurrentTime changes externally (from transport controls seeking)
+  useEffect(() => {
+    if (currentPreview?.type === 'mask' && !maskTimeUpdateRef.current && maskDuration > 0) {
+      const fps = 24
+      const totalFrames = currentPreview.maskFrames?.length || 1
+      const expectedFrame = Math.min(Math.floor(assetCurrentTime * fps), totalFrames - 1)
+      if (expectedFrame !== maskFrame && expectedFrame >= 0) {
+        setMaskFrame(expectedFrame)
+      }
+    }
+    maskTimeUpdateRef.current = false
+  }, [assetCurrentTime, currentPreview, maskDuration, maskFrame])
+  
+  // Handle mask time updates (from playback) - sets the ref to avoid re-syncing
+  const handleMaskTimeUpdate = useCallback((time) => {
+    maskTimeUpdateRef.current = true
+    setAssetCurrentTime(time)
+  }, [setAssetCurrentTime])
+  
+  // Handle mask duration set - stable callback to avoid infinite loops
+  const handleMaskDurationSet = useCallback((dur) => {
+    setMaskDuration(dur)
+    setAssetDuration(dur)
+  }, [setAssetDuration])
+  
+  // Handle mask playback ended
+  const handleMaskEnded = useCallback(() => {
+    setAssetIsPlaying(false)
+  }, [setAssetIsPlaying])
   
   // Reset view to center
   const resetView = useCallback(() => {
@@ -840,6 +1055,22 @@ function PreviewPanel() {
             {isFullscreen && <span className="ml-2 text-sf-text-muted">(Press ESC to exit)</span>}
           </span>
           
+          {/* Info Overlay Toggle */}
+          <button
+            onClick={() => setShowInfoOverlay(!showInfoOverlay)}
+            className={`flex items-center gap-1.5 px-2 py-1 hover:bg-sf-dark-700 rounded transition-colors text-xs ${
+              showInfoOverlay ? 'text-sf-text-muted' : 'text-sf-text-muted/50'
+            }`}
+            title={showInfoOverlay ? 'Hide Info Overlay' : 'Show Info Overlay'}
+          >
+            {showInfoOverlay ? (
+              <Eye className="w-3.5 h-3.5" />
+            ) : (
+              <EyeOff className="w-3.5 h-3.5" />
+            )}
+            <span>Info</span>
+          </button>
+          
           {/* Safe Guides Dropdown */}
           <div className="relative">
             <button
@@ -994,51 +1225,64 @@ function PreviewPanel() {
                 />
                 
                 {/* Timeline Mode Overlay */}
-                <div className="absolute top-2 left-2 right-2 flex items-start justify-between pointer-events-none z-50">
-                  <div className="flex items-center gap-2 flex-wrap">
-                    <div className="px-2 py-1 bg-sf-accent/80 rounded text-xs text-white flex items-center gap-1">
-                      <Film className="w-3 h-3" />
-                      Timeline
+                {showInfoOverlay && (
+                  <div className="absolute top-2 left-2 right-2 flex items-start justify-between pointer-events-none z-50">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className="px-2 py-1 bg-sf-accent/80 rounded text-xs text-white flex items-center gap-1">
+                        <Film className="w-3 h-3" />
+                        Timeline
+                      </div>
+                      {/* Show timeline resolution */}
+                      {timelineSettings && (
+                        <div className={`px-2 py-1 rounded text-xs ${timelineSettings.isTimelineSpecific ? 'bg-purple-600/80 text-white' : 'bg-sf-dark-900/80 text-sf-text-muted'}`}>
+                          {timelineSettings.width}×{timelineSettings.height} @ {timelineSettings.fps}fps
+                        </div>
+                      )}
+                      {activeLayerClips.length > 1 ? (
+                        // Show layer count in multi-layer mode
+                        <div className="px-2 py-1 bg-green-600/80 rounded text-xs text-white">
+                          {activeLayerClips.length} Layers
+                        </div>
+                      ) : activeClip ? (
+                        <div className="px-2 py-1 bg-sf-dark-900/80 rounded text-xs text-sf-text-muted">
+                          {activeClip.name}
+                        </div>
+                      ) : null}
+                      {transitionInfo && (
+                        <div className="px-2 py-1 bg-purple-600/80 rounded text-xs text-white capitalize">
+                          {transitionInfo.transition?.type?.replace('-', ' ') || 'Dissolve'} {Math.round(transitionInfo.progress * 100)}%
+                        </div>
+                      )}
                     </div>
-                    {/* Show timeline resolution */}
-                    {timelineSettings && (
-                      <div className={`px-2 py-1 rounded text-xs ${timelineSettings.isTimelineSpecific ? 'bg-purple-600/80 text-white' : 'bg-sf-dark-900/80 text-sf-text-muted'}`}>
-                        {timelineSettings.width}×{timelineSettings.height} @ {timelineSettings.fps}fps
-                      </div>
-                    )}
-                    {activeLayerClips.length > 1 ? (
-                      // Show layer count in multi-layer mode
-                      <div className="px-2 py-1 bg-green-600/80 rounded text-xs text-white">
-                        {activeLayerClips.length} Layers
-                      </div>
-                    ) : activeClip ? (
-                      <div className="px-2 py-1 bg-sf-dark-900/80 rounded text-xs text-sf-text-muted">
-                        {activeClip.name}
-                      </div>
-                    ) : null}
-                    {transitionInfo && (
-                      <div className="px-2 py-1 bg-purple-600/80 rounded text-xs text-white capitalize">
-                        {transitionInfo.transition?.type?.replace('-', ' ') || 'Dissolve'} {Math.round(transitionInfo.progress * 100)}%
-                      </div>
+                    {currentPreview && (
+                      <button 
+                        onClick={() => {
+                          setPreviewMode('asset')
+                          if (timelineIsPlaying) timelineTogglePlay()
+                        }}
+                        className="px-2 py-1 bg-sf-dark-900/80 hover:bg-sf-dark-700 rounded text-xs text-sf-text-muted pointer-events-auto transition-colors"
+                      >
+                        View Asset
+                      </button>
                     )}
                   </div>
-                  {currentPreview && (
-                    <button 
-                      onClick={() => {
-                        setPreviewMode('asset')
-                        if (timelineIsPlaying) timelineTogglePlay()
-                      }}
-                      className="px-2 py-1 bg-sf-dark-900/80 hover:bg-sf-dark-700 rounded text-xs text-sf-text-muted pointer-events-auto transition-colors"
-                    >
-                      View Asset
-                    </button>
-                  )}
-                </div>
+                )}
               </>
             ) : currentPreview ? (
               <>
-                {/* Asset Preview Mode - Video or Image */}
-                {currentPreview.type === 'image' ? (
+                {/* Asset Preview Mode - Video, Image, or Mask */}
+                {currentPreview.type === 'mask' ? (
+                  /* Mask Preview - with frame-by-frame playback for video masks */
+                  <MaskPreview
+                    mask={currentPreview}
+                    isPlaying={assetIsPlaying}
+                    currentFrame={maskFrame}
+                    onFrameChange={setMaskFrame}
+                    onDurationSet={handleMaskDurationSet}
+                    onTimeUpdate={handleMaskTimeUpdate}
+                    onEnded={handleMaskEnded}
+                  />
+                ) : currentPreview.type === 'image' ? (
                   <img
                     src={currentPreview.url}
                     alt={currentPreview.name}
@@ -1066,41 +1310,99 @@ function PreviewPanel() {
                     onContextMenu={(e) => e.preventDefault()}
                     controlsList="nodownload nofullscreen noremoteplayback"
                     disablePictureInPicture
-                    loop
                   />
                 )}
                 
                 {/* Asset Info Overlay */}
-                <div className="absolute top-2 left-2 right-2 flex items-start justify-between pointer-events-none">
-                  <div className="px-2 py-1 bg-sf-dark-900/80 rounded text-xs text-sf-text-muted">
-                    {currentPreview.type === 'image' ? 'Image' : (currentPreview.settings?.resolution || '1280x720')}
-                  </div>
-                  <div className="flex gap-2 pointer-events-auto">
-                    <button 
-                      className={`px-2 py-1 rounded text-xs text-white font-medium flex items-center gap-1 transition-colors ${
-                        justAdded 
-                          ? 'bg-sf-success' 
-                          : 'bg-sf-accent/90 hover:bg-sf-accent'
-                      }`}
-                      onClick={handleAddToTimeline}
-                    >
-                      {justAdded ? (
-                        <>
-                          <Check className="w-3 h-3" />
-                          Added!
-                        </>
-                      ) : (
-                        <>
-                          <Plus className="w-3 h-3" />
-                          Add to Timeline
-                        </>
+                {showInfoOverlay && (
+                  <div className="absolute top-2 left-2 right-2 flex items-start justify-between pointer-events-none">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {/* Type Badge */}
+                      <div className={`px-2 py-1 rounded text-xs text-white flex items-center gap-1 ${
+                        currentPreview.type === 'mask' ? 'bg-purple-600/80' :
+                        currentPreview.type === 'image' ? 'bg-green-600/80' : 
+                        currentPreview.type === 'audio' ? 'bg-purple-600/80' : 'bg-blue-600/80'
+                      }`}>
+                        {currentPreview.type === 'mask' ? (
+                          <svg className="w-3 h-3" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                            <circle cx="12" cy="12" r="10"/>
+                            <path d="M12 2a10 10 0 0 1 0 20"/>
+                          </svg>
+                        ) : currentPreview.type === 'image' ? (
+                          <ImageIcon className="w-3 h-3" />
+                        ) : (
+                          <Film className="w-3 h-3" />
+                        )}
+                        {currentPreview.type?.charAt(0).toUpperCase() + currentPreview.type?.slice(1)}
+                      </div>
+                      
+                      {/* Resolution/Dimensions */}
+                      {(currentPreview.settings?.width || currentPreview.width) && (
+                        <div className="px-2 py-1 bg-sf-dark-900/80 rounded text-xs text-sf-text-muted">
+                          {currentPreview.settings?.width || currentPreview.width}×{currentPreview.settings?.height || currentPreview.height}
+                        </div>
                       )}
-                    </button>
+                      
+                      {/* Duration (video/audio only - not image or mask) */}
+                      {currentPreview.type !== 'image' && currentPreview.type !== 'mask' && (currentPreview.settings?.duration || currentPreview.duration) && (
+                        <div className="px-2 py-1 bg-sf-dark-900/80 rounded text-xs text-sf-text-muted">
+                          {(currentPreview.settings?.duration || currentPreview.duration)?.toFixed(2)}s
+                        </div>
+                      )}
+                      
+                      {/* Frame count for masks */}
+                      {currentPreview.type === 'mask' && currentPreview.frameCount && (
+                        <div className="px-2 py-1 bg-sf-dark-900/80 rounded text-xs text-sf-text-muted">
+                          {currentPreview.frameCount} frame{currentPreview.frameCount > 1 ? 's' : ''}
+                        </div>
+                      )}
+                      
+                      {/* File Size */}
+                      {currentPreview.size && (
+                        <div className="px-2 py-1 bg-sf-dark-900/80 rounded text-xs text-sf-text-muted">
+                          {currentPreview.size < 1024 * 1024 
+                            ? `${(currentPreview.size / 1024).toFixed(1)} KB`
+                            : `${(currentPreview.size / (1024 * 1024)).toFixed(1)} MB`
+                          }
+                        </div>
+                      )}
+                      
+                      {/* AI/Imported Badge */}
+                      <div className={`px-2 py-1 rounded text-xs ${
+                        currentPreview.isImported 
+                          ? 'bg-sf-dark-700/90 text-sf-text-muted' 
+                          : 'bg-sf-accent/80 text-white'
+                      }`}>
+                        {currentPreview.isImported ? 'IMP' : 'AI'}
+                      </div>
+                    </div>
+                    <div className="flex gap-2 pointer-events-auto">
+                      <button 
+                        className={`px-2 py-1 rounded text-xs text-white font-medium flex items-center gap-1 transition-colors ${
+                          justAdded 
+                            ? 'bg-sf-success' 
+                            : 'bg-sf-accent/90 hover:bg-sf-accent'
+                        }`}
+                        onClick={handleAddToTimeline}
+                      >
+                        {justAdded ? (
+                          <>
+                            <Check className="w-3 h-3" />
+                            Added!
+                          </>
+                        ) : (
+                          <>
+                            <Plus className="w-3 h-3" />
+                            Add to Timeline
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
-                </div>
+                )}
 
                 {/* Prompt Overlay (bottom) - only for AI-generated assets */}
-                {currentPreview.prompt && (
+                {showInfoOverlay && currentPreview.prompt && (
                   <div className="absolute bottom-0 left-0 right-0 p-3 bg-gradient-to-t from-black/80 to-transparent pointer-events-none">
                     <p className="text-xs text-white/80 line-clamp-2">
                       {currentPreview.prompt}
@@ -1132,7 +1434,7 @@ function PreviewPanel() {
             )}
             
             {/* Resolution Indicator (when no content) */}
-            {!currentPreview && previewMode !== 'timeline' && timelineSettings && (
+            {showInfoOverlay && !currentPreview && previewMode !== 'timeline' && timelineSettings && (
               <div className="absolute top-2 left-2 px-2 py-0.5 bg-sf-dark-900/80 rounded text-xs text-sf-text-muted">
                 {timelineSettings.width}×{timelineSettings.height}
               </div>
@@ -1143,6 +1445,79 @@ function PreviewPanel() {
           {renderSafeGuides()}
         </div>
       </div>
+      
+      {/* Preview Scrubber Bar - Like DaVinci Resolve's viewer scrubber */}
+      {hasContent && !isFullscreen && (
+        <div className="h-7 bg-sf-dark-900 border-t border-sf-dark-700 flex items-center px-3 gap-2 flex-shrink-0">
+          {/* Timecode - Current */}
+          <span className="text-[10px] text-sf-text-secondary font-mono w-12 text-right">
+            {formatTime(currentTime)}
+          </span>
+          
+          {/* Scrubber Track */}
+          <div 
+            className="flex-1 h-4 relative cursor-pointer group"
+            onClick={(e) => {
+              const rect = e.currentTarget.getBoundingClientRect()
+              const x = e.clientX - rect.left
+              const percent = x / rect.width
+              const newTime = percent * duration
+              seekTo(Math.max(0, Math.min(duration, newTime)))
+            }}
+            onMouseDown={(e) => {
+              e.preventDefault()
+              const scrubber = e.currentTarget
+              
+              const handleScrub = (moveEvent) => {
+                const rect = scrubber.getBoundingClientRect()
+                const x = moveEvent.clientX - rect.left
+                const percent = Math.max(0, Math.min(1, x / rect.width))
+                const newTime = percent * duration
+                seekTo(newTime)
+              }
+              
+              const handleMouseUp = () => {
+                window.removeEventListener('mousemove', handleScrub)
+                window.removeEventListener('mouseup', handleMouseUp)
+              }
+              
+              window.addEventListener('mousemove', handleScrub)
+              window.addEventListener('mouseup', handleMouseUp)
+              
+              // Initial scrub on mousedown
+              handleScrub(e)
+            }}
+          >
+            {/* Track Background */}
+            <div className="absolute inset-x-0 top-1/2 -translate-y-1/2 h-1 bg-sf-dark-700 rounded-full" />
+            
+            {/* Progress Fill */}
+            <div 
+              className="absolute top-1/2 -translate-y-1/2 h-1 bg-sf-accent/60 rounded-full left-0"
+              style={{ width: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
+            />
+            
+            {/* Playhead Indicator */}
+            <div 
+              className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-sf-accent rounded-full shadow-md transform -translate-x-1/2 group-hover:scale-110 transition-transform"
+              style={{ left: `${duration > 0 ? (currentTime / duration) * 100 : 0}%` }}
+            />
+            
+            {/* Hover time indicator */}
+            <div className="absolute inset-0 opacity-0 group-hover:opacity-100">
+              <div 
+                className="absolute top-1/2 -translate-y-1/2 h-1.5 bg-white/20 rounded-full left-0 pointer-events-none"
+                style={{ width: '100%' }}
+              />
+            </div>
+          </div>
+          
+          {/* Timecode - Duration */}
+          <span className="text-[10px] text-sf-text-muted font-mono w-12">
+            {formatTime(duration)}
+          </span>
+        </div>
+      )}
       
       {/* Fullscreen Transport Controls */}
       {isFullscreen && (

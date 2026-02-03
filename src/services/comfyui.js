@@ -18,6 +18,8 @@ class ComfyUIService {
     this.clientId = this.generateClientId();
     this.listeners = new Map();
     this.wsFailCount = 0;
+    this.lastWsAttempt = 0;
+    this.wsBackoffMs = 5000; // Minimum time between reconnection attempts
   }
 
   generateClientId() {
@@ -36,6 +38,14 @@ class ComfyUIService {
         return;
       }
       
+      // Rate limit reconnection attempts to avoid spam
+      const now = Date.now();
+      if (now - this.lastWsAttempt < this.wsBackoffMs) {
+        reject(new Error('WebSocket reconnection rate limited'));
+        return;
+      }
+      this.lastWsAttempt = now;
+      
       // Close existing connection if in connecting/closing state
       if (this.ws) {
         try {
@@ -47,7 +57,10 @@ class ComfyUIService {
       // Always connect directly to ComfyUI (Vite proxy doesn't handle WS well)
       const wsUrl = `${COMFYUI_WS}/ws?clientId=${this.clientId}`;
       
-      console.log('Connecting to ComfyUI WebSocket:', wsUrl);
+      // Only log first attempt
+      if (this.wsFailCount === 0) {
+        console.log('Connecting to ComfyUI WebSocket:', wsUrl);
+      }
       this.ws = new WebSocket(wsUrl);
       
       // Set a timeout for connection
@@ -68,8 +81,13 @@ class ComfyUIService {
 
       this.ws.onerror = (error) => {
         clearTimeout(timeout);
-        console.error('WebSocket error:', error);
+        // Only log first few errors to avoid spam
+        if (this.wsFailCount < 3) {
+          console.warn('WebSocket connection failed (ComfyUI may not support WebSocket or is blocked)');
+        }
         this.wsFailCount++;
+        // Increase backoff on repeated failures
+        this.wsBackoffMs = Math.min(30000, this.wsBackoffMs * 1.5);
         reject(error);
       };
 
@@ -274,6 +292,90 @@ class ComfyUIService {
   }
   
   /**
+   * Upload a file to ComfyUI
+   * @param {File|Blob} file - The file to upload
+   * @param {string} filename - Optional filename override
+   * @param {string} subfolder - Optional subfolder (default: empty)
+   * @param {string} type - 'input', 'temp', or 'output' (default: 'input')
+   * @returns {Promise<{name: string, subfolder: string, type: string}>}
+   */
+  async uploadFile(file, filename = null, subfolder = '', type = 'input') {
+    try {
+      const formData = new FormData();
+      
+      // Use provided filename or file's name
+      const uploadFilename = filename || file.name || `upload_${Date.now()}`;
+      
+      // Append the file with the correct filename
+      formData.append('image', file, uploadFilename);
+      
+      if (subfolder) {
+        formData.append('subfolder', subfolder);
+      }
+      formData.append('type', type);
+      formData.append('overwrite', 'true');
+
+      const response = await fetch(`${COMFYUI_HTTP}/upload/image`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Failed to upload file: ${response.status} - ${errorText}`);
+      }
+
+      const result = await response.json();
+      console.log('File uploaded to ComfyUI:', result);
+      return result;
+    } catch (error) {
+      console.error('Error uploading file to ComfyUI:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Download an image from ComfyUI and return as a File object
+   * @param {string} filename - The filename on ComfyUI
+   * @param {string} subfolder - The subfolder
+   * @param {string} type - The type (usually 'output')
+   * @returns {Promise<File>} - The image as a File object
+   */
+  async downloadImage(filename, subfolder = '', type = 'output') {
+    const url = this.getMediaUrl(filename, subfolder, type);
+    
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`Failed to download image: ${response.status}`);
+      }
+      
+      const blob = await response.blob();
+      const mimeType = blob.type || 'image/png';
+      
+      // Create a File object from the blob
+      return new File([blob], filename, { type: mimeType });
+    } catch (error) {
+      console.error('Error downloading image from ComfyUI:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Download multiple images (PNG sequence) from ComfyUI
+   * @param {Array<{filename: string, subfolder: string, type: string}>} images - Array of image info
+   * @returns {Promise<File[]>} - Array of File objects
+   */
+  async downloadImageSequence(images) {
+    const files = [];
+    for (const img of images) {
+      const file = await this.downloadImage(img.filename, img.subfolder || '', img.type || 'output');
+      files.push(file);
+    }
+    return files;
+  }
+
+  /**
    * Get detailed prompt execution info for progress tracking
    * This is useful when WebSocket is unavailable
    */
@@ -384,6 +486,50 @@ export function modifyLTX2Workflow(workflow, options = {}) {
   }
   if (modified['92:99']) {
     modified['92:99'].inputs.value = fps;
+  }
+
+  return modified;
+}
+
+/**
+ * Workflow modifier for Mask Generation (SAM3 + MatAnyone)
+ * 
+ * Workflow nodes:
+ * - Node 8 (VHS_LoadVideo): Load the input video/image
+ * - Node 12 (SAM3VideoSegmentation): Text prompt for segmentation
+ * - Node 5 (SaveImage): Output filename prefix
+ * 
+ * @param {Object} workflow - The base mask generation workflow
+ * @param {Object} options - Configuration options
+ * @returns {Object} Modified workflow
+ */
+export function modifyMaskWorkflow(workflow, options = {}) {
+  const {
+    inputFilename = '',       // The uploaded filename in ComfyUI
+    textPrompt = '',          // What to segment (e.g., "person on the left")
+    outputPrefix = 'StoryFlowMask',  // Output filename prefix
+    scoreThreshold = 0.04,    // Detection sensitivity (lower = more sensitive)
+    frameIdx = 0,             // Which frame to use for initial detection
+  } = options;
+
+  // Create a deep copy
+  const modified = JSON.parse(JSON.stringify(workflow));
+
+  // Update input video/image (node 8 - VHS_LoadVideo)
+  if (modified['8']) {
+    modified['8'].inputs.video = inputFilename;
+  }
+
+  // Update text prompt and threshold (node 12 - SAM3VideoSegmentation)
+  if (modified['12']) {
+    modified['12'].inputs.text_prompt = textPrompt;
+    modified['12'].inputs.score_threshold = scoreThreshold;
+    modified['12'].inputs.frame_idx = frameIdx;
+  }
+
+  // Update output filename prefix (node 5 - SaveImage)
+  if (modified['5']) {
+    modified['5'].inputs.filename_prefix = outputPrefix;
   }
 
   return modified;

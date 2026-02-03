@@ -9,7 +9,7 @@ import { persist } from 'zustand/middleware'
  * {
  *   id: string,
  *   name: string,
- *   type: 'video' | 'audio' | 'image',
+ *   type: 'video' | 'audio' | 'image' | 'mask',
  *   url: string (blob URL for playback),
  *   path: string (relative path in project for imported assets),
  *   createdAt: ISO string,
@@ -19,6 +19,12 @@ import { persist } from 'zustand/middleware'
  *   prompt: string (for AI-generated),
  *   mimeType: string,
  *   size: number,
+ *   folderId: string | null (folder organization),
+ *   
+ *   // Mask-specific fields:
+ *   sourceAssetId: string (for masks - the asset the mask was generated from),
+ *   frameCount: number (for video masks - number of PNG frames),
+ *   maskFrames: Array<{filename, url}> (for video masks - individual frame data),
  * }
  */
 export const useAssetsStore = create(
@@ -27,11 +33,15 @@ export const useAssetsStore = create(
   // All assets (AI-generated + imported)
   assets: [],
   
+  // Folders for organizing assets
+  folders: [],
+  
   // Currently selected asset for preview
   currentPreview: null,
   
   // Counter for auto-naming
   assetCounter: 1,
+  folderCounter: 1,
   
   // Video playback state (shared between PreviewPanel and TransportControls)
   videoRef: null,
@@ -58,23 +68,28 @@ export const useAssetsStore = create(
   },
   
   togglePlay: () => {
-    const { videoRef, isPlaying } = get()
+    const { videoRef, isPlaying, currentPreview } = get()
     if (videoRef) {
       if (isPlaying) {
         videoRef.pause()
       } else {
         videoRef.play()
       }
+    } else if (currentPreview?.type === 'mask') {
+      // For masks (no videoRef), just toggle the isPlaying state
+      // The MaskPreview component will handle the actual playback
+      set({ isPlaying: !isPlaying })
     }
   },
   
   seekTo: (time) => {
     const { videoRef, duration } = get()
+    const clampedTime = Math.max(0, Math.min(duration, time))
     if (videoRef) {
-      const clampedTime = Math.max(0, Math.min(duration, time))
       videoRef.currentTime = clampedTime
-      set({ currentTime: clampedTime })
     }
+    // Always update currentTime state (needed for masks and other non-video assets)
+    set({ currentTime: clampedTime })
   },
   
   skip: (seconds) => {
@@ -123,9 +138,15 @@ export const useAssetsStore = create(
   
   /**
    * Set the current preview
+   * Also resets playback state for the new asset
    */
   setPreview: (asset) => {
-    set({ currentPreview: asset, previewMode: 'asset' })
+    set({ 
+      currentPreview: asset, 
+      previewMode: 'asset',
+      isPlaying: false,  // Don't auto-play, let user control
+      currentTime: 0,    // Reset to start
+    })
   },
   
   /**
@@ -172,6 +193,79 @@ export const useAssetsStore = create(
   },
 
   /**
+   * Move an asset to a folder
+   * @param {string} assetId - The asset ID
+   * @param {string|null} folderId - The folder ID (null = root)
+   */
+  moveAssetToFolder: (assetId, folderId) => {
+    set((state) => ({
+      assets: state.assets.map(a =>
+        a.id === assetId ? { ...a, folderId } : a
+      ),
+      currentPreview: state.currentPreview?.id === assetId
+        ? { ...state.currentPreview, folderId }
+        : state.currentPreview
+    }))
+  },
+
+  /**
+   * Add a new folder
+   * @param {object} folder - Folder data { name, parentId }
+   */
+  addFolder: (folder) => {
+    const state = get()
+    const newFolder = {
+      id: `folder-${state.folderCounter}`,
+      name: folder.name,
+      parentId: folder.parentId || null,
+      createdAt: new Date().toISOString()
+    }
+    set((state) => ({
+      folders: [...state.folders, newFolder],
+      folderCounter: state.folderCounter + 1
+    }))
+    return newFolder
+  },
+
+  /**
+   * Remove a folder (moves contained assets to parent folder)
+   * @param {string} folderId - The folder ID to remove
+   */
+  removeFolder: (folderId) => {
+    const state = get()
+    const folder = state.folders.find(f => f.id === folderId)
+    if (!folder) return
+
+    // Move all assets in this folder to the parent folder
+    const updatedAssets = state.assets.map(a =>
+      a.folderId === folderId ? { ...a, folderId: folder.parentId } : a
+    )
+
+    // Move all subfolders to the parent folder
+    const updatedFolders = state.folders
+      .filter(f => f.id !== folderId)
+      .map(f => f.parentId === folderId ? { ...f, parentId: folder.parentId } : f)
+
+    set({
+      assets: updatedAssets,
+      folders: updatedFolders
+    })
+  },
+
+  /**
+   * Rename a folder
+   * @param {string} folderId - The folder ID
+   * @param {string} newName - The new name
+   */
+  renameFolder: (folderId, newName) => {
+    set((state) => ({
+      folders: state.folders.map(f =>
+        f.id === folderId ? { ...f, name: newName } : f
+      )
+    }))
+  },
+
+  /**
    * Clear all assets (for "New Project")
    */
   clearProject: () => {
@@ -185,8 +279,10 @@ export const useAssetsStore = create(
     
     set({
       assets: [],
+      folders: [],
       currentPreview: null,
       assetCounter: 1,
+      folderCounter: 1,
       isPlaying: false,
       currentTime: 0,
       duration: 0,
@@ -258,6 +354,26 @@ export const useAssetsStore = create(
   },
 
   /**
+   * Get asset by ID
+   * @param {string} assetId - The asset ID to find
+   * @returns {Object|null} - The asset or null if not found
+   */
+  getAssetById: (assetId) => {
+    return get().assets.find(a => a.id === assetId) || null
+  },
+
+  /**
+   * Get the current valid URL for an asset
+   * This is used by clips to get the latest URL (in case it was regenerated after page refresh)
+   * @param {string} assetId - The asset ID
+   * @returns {string|null} - The current URL or null
+   */
+  getAssetUrl: (assetId) => {
+    const asset = get().assets.find(a => a.id === assetId)
+    return asset?.url || null
+  },
+
+  /**
    * Regenerate URLs for all imported assets that have null URLs
    * Called when project handle becomes available
    * @param {FileSystemDirectoryHandle} projectHandle - The project directory handle
@@ -282,6 +398,64 @@ export const useAssetsStore = create(
         console.warn(`Could not regenerate URL for ${asset.name}:`, err)
       }
     }
+  },
+
+  /**
+   * Get all mask assets for a specific source asset
+   * @param {string} sourceAssetId - The source asset ID
+   * @returns {Array} - Array of mask assets
+   */
+  getMasksForAsset: (sourceAssetId) => {
+    return get().assets.filter(a => a.type === 'mask' && a.sourceAssetId === sourceAssetId)
+  },
+
+  /**
+   * Get all mask assets in the project
+   * @returns {Array} - Array of all mask assets
+   */
+  getAllMasks: () => {
+    return get().assets.filter(a => a.type === 'mask')
+  },
+
+  /**
+   * Add a mask asset with proper structure
+   * @param {Object} maskData - Mask asset data
+   * @returns {Object} - The created mask asset
+   */
+  addMaskAsset: (maskData) => {
+    console.log('addMaskAsset called with:', maskData)
+    
+    const state = get()
+    const counter = state.assetCounter
+    
+    const newMask = {
+      id: Date.now().toString(),
+      createdAt: new Date().toISOString(),
+      type: 'mask',
+      name: maskData.name || `Mask_${String(counter).padStart(3, '0')}`,
+      sourceAssetId: maskData.sourceAssetId,
+      prompt: maskData.prompt,
+      url: maskData.url,                    // For single image masks
+      maskFrames: maskData.maskFrames || [], // For video masks (PNG sequence)
+      frameCount: maskData.frameCount || 1,
+      settings: maskData.settings || {},
+      path: maskData.path,
+      mimeType: maskData.mimeType || 'image/png',
+      folderId: maskData.folderId || null,
+      isImported: false, // Masks are always AI-generated
+    }
+    
+    console.log('Creating mask asset:', newMask)
+    
+    set((state) => ({
+      assets: [newMask, ...state.assets],
+      assetCounter: state.assetCounter + 1,
+      currentPreview: newMask
+    }))
+    
+    console.log('Mask asset added to store')
+    
+    return newMask
   }
     }),
     {
@@ -289,7 +463,9 @@ export const useAssetsStore = create(
       partialize: (state) => ({
         // Only persist these fields (exclude transient playback state)
         assets: state.assets,
+        folders: state.folders,
         assetCounter: state.assetCounter,
+        folderCounter: state.folderCounter,
         volume: state.volume,
         // Don't persist previewMode - always start fresh
       }),

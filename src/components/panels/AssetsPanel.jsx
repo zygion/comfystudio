@@ -1,21 +1,68 @@
-import { Upload, FolderOpen, Image, Video, Music, Search, Grid, List, Trash2, Edit3, Play, FileVideo, FileAudio, FileImage, Loader2 } from 'lucide-react'
-import { useState, useRef } from 'react'
+import { Upload, FolderOpen, Image, Video, Music, Search, Grid, List, Trash2, Edit3, Play, FileVideo, FileAudio, FileImage, Loader2, FolderPlus, ChevronRight, ChevronLeft, Home, Minus, Plus, MoreVertical, FolderInput, Wand2, Layers } from 'lucide-react'
+import { useState, useRef, useEffect } from 'react'
 import useAssetsStore from '../../stores/assetsStore'
 import useProjectStore from '../../stores/projectStore'
+import useTimelineStore from '../../stores/timelineStore'
 import { importAsset } from '../../services/fileSystem'
+import MaskGenerationDialog from '../MaskGenerationDialog'
+
+// Thumbnail size presets
+const THUMBNAIL_SIZES = {
+  small: { cols: 3, iconSize: 'w-4 h-4', playSize: 'w-4 h-4', badgeSize: 'text-[6px]', nameSize: 'text-[9px]', infoSize: 'text-[8px]' },
+  medium: { cols: 2, iconSize: 'w-6 h-6', playSize: 'w-6 h-6', badgeSize: 'text-[7px]', nameSize: 'text-[10px]', infoSize: 'text-[9px]' },
+  large: { cols: 1, iconSize: 'w-8 h-8', playSize: 'w-8 h-8', badgeSize: 'text-[8px]', nameSize: 'text-[11px]', infoSize: 'text-[10px]' },
+}
 
 function AssetsPanel() {
   const [viewMode, setViewMode] = useState('grid')
+  const [thumbnailSize, setThumbnailSize] = useState('medium')
   const [searchQuery, setSearchQuery] = useState('')
   const [editingId, setEditingId] = useState(null)
   const [editName, setEditName] = useState('')
   const [isImporting, setIsImporting] = useState(false)
   const [isDragOver, setIsDragOver] = useState(false)
   const fileInputRef = useRef(null)
+  
+  // Folder state
+  const [currentFolderId, setCurrentFolderId] = useState(null) // null = root
+  const [showNewFolderInput, setShowNewFolderInput] = useState(false)
+  const [newFolderName, setNewFolderName] = useState('')
+  const [contextMenu, setContextMenu] = useState(null) // { x, y, assetId }
+  const newFolderInputRef = useRef(null)
+  
+  // Mask generation state
+  const [maskDialogAsset, setMaskDialogAsset] = useState(null) // Asset to generate mask for
 
   // Get assets from store
-  const { assets, currentPreview, setPreview, removeAsset, renameAsset, addAsset } = useAssetsStore()
+  const { 
+    assets, 
+    currentPreview, 
+    setPreview, 
+    removeAsset, 
+    renameAsset, 
+    addAsset,
+    folders,
+    addFolder,
+    removeFolder,
+    renameFolder,
+    moveAssetToFolder
+  } = useAssetsStore()
   const { currentProjectHandle } = useProjectStore()
+  const { isPlaying: timelineIsPlaying, togglePlay: timelineTogglePlay } = useTimelineStore()
+  
+  // Load thumbnail size from localStorage
+  useEffect(() => {
+    const saved = localStorage.getItem('assetsThumbnailSize')
+    if (saved && THUMBNAIL_SIZES[saved]) {
+      setThumbnailSize(saved)
+    }
+  }, [])
+  
+  // Save thumbnail size to localStorage
+  const setAndSaveThumbnailSize = (size) => {
+    setThumbnailSize(size)
+    localStorage.setItem('assetsThumbnailSize', size)
+  }
   
   // Supported file types
   const SUPPORTED_VIDEO = ['.mp4', '.webm', '.mov']
@@ -49,10 +96,10 @@ function AssetsPanel() {
         const assetInfo = await importAsset(currentProjectHandle, file, category)
         
         // Add to assets store with URL for playback
-        // Note: We'll need to get a URL when the asset is used
         addAsset({
           ...assetInfo,
-          url: URL.createObjectURL(file), // Temporary URL for preview
+          url: URL.createObjectURL(file),
+          folderId: currentFolderId, // Add to current folder
           settings: {
             duration: assetInfo.duration,
           },
@@ -69,7 +116,7 @@ function AssetsPanel() {
   const handleFileInputChange = (e) => {
     const files = Array.from(e.target.files || [])
     handleImport(files)
-    e.target.value = '' // Reset input
+    e.target.value = ''
   }
   
   // Handle drag and drop
@@ -106,18 +153,57 @@ function AssetsPanel() {
     fileInputRef.current?.click()
   }
 
-  // Filter assets by search query
-  const filteredAssets = assets.filter(asset => 
-    asset.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    asset.prompt?.toLowerCase().includes(searchQuery.toLowerCase())
-  )
+  // Get current folder and its subfolders
+  const currentFolder = currentFolderId ? folders?.find(f => f.id === currentFolderId) : null
+  const subFolders = (folders || []).filter(f => f.parentId === currentFolderId)
+  
+  // Filter assets by current folder and search query
+  const filteredAssets = assets.filter(asset => {
+    const matchesFolder = (asset.folderId || null) === currentFolderId
+    const matchesSearch = searchQuery === '' || 
+      asset.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      asset.prompt?.toLowerCase().includes(searchQuery.toLowerCase())
+    return matchesFolder && matchesSearch
+  })
+  
+  // Get folder breadcrumb path
+  const getFolderPath = () => {
+    if (!currentFolderId) return []
+    const path = []
+    let folderId = currentFolderId
+    while (folderId) {
+      const folder = folders?.find(f => f.id === folderId)
+      if (folder) {
+        path.unshift(folder)
+        folderId = folder.parentId
+      } else {
+        break
+      }
+    }
+    return path
+  }
 
   const getIcon = (type) => {
     switch (type) {
       case 'image': return Image
       case 'video': return Video
       case 'audio': return Music
+      case 'mask': return Layers
       default: return FolderOpen
+    }
+  }
+  
+  // Check if asset can have a mask generated
+  const canGenerateMask = (asset) => {
+    return asset.type === 'video' || asset.type === 'image'
+  }
+  
+  // Handle opening mask generation dialog
+  const handleOpenMaskDialog = (assetId) => {
+    const asset = assets.find(a => a.id === assetId)
+    if (asset && canGenerateMask(asset)) {
+      setMaskDialogAsset(asset)
+      setContextMenu(null)
     }
   }
 
@@ -135,14 +221,25 @@ function AssetsPanel() {
     return date.toLocaleDateString()
   }
 
-  // Handle double-click to preview (shows asset in preview panel)
+  // Handle double-click to preview
   const handleDoubleClick = (asset) => {
-    setPreview(asset) // This now also sets previewMode to 'asset'
+    if (timelineIsPlaying) {
+      timelineTogglePlay()
+    }
+    setPreview(asset)
   }
   
   // Handle single-click to select and preview
   const handleClick = (asset) => {
-    setPreview(asset) // This now also sets previewMode to 'asset'
+    if (timelineIsPlaying) {
+      timelineTogglePlay()
+    }
+    setPreview(asset)
+  }
+  
+  // Handle folder click
+  const handleFolderClick = (folderId) => {
+    setCurrentFolderId(folderId)
   }
 
   // Start editing name
@@ -169,6 +266,49 @@ function AssetsPanel() {
       removeAsset(id)
     }
   }
+  
+  // Create new folder
+  const handleCreateFolder = () => {
+    if (newFolderName.trim()) {
+      addFolder({
+        name: newFolderName.trim(),
+        parentId: currentFolderId
+      })
+      setNewFolderName('')
+      setShowNewFolderInput(false)
+    }
+  }
+  
+  // Handle context menu
+  const handleContextMenu = (e, assetId) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setContextMenu({ x: e.clientX, y: e.clientY, assetId })
+  }
+  
+  // Close context menu when clicking outside
+  useEffect(() => {
+    if (!contextMenu) return
+    const handleClick = () => setContextMenu(null)
+    window.addEventListener('click', handleClick)
+    return () => window.removeEventListener('click', handleClick)
+  }, [contextMenu])
+  
+  // Move asset to folder
+  const handleMoveToFolder = (assetId, folderId) => {
+    moveAssetToFolder(assetId, folderId)
+    setContextMenu(null)
+  }
+  
+  // Focus new folder input when shown
+  useEffect(() => {
+    if (showNewFolderInput && newFolderInputRef.current) {
+      newFolderInputRef.current.focus()
+    }
+  }, [showNewFolderInput])
+  
+  // Get thumbnail size config
+  const sizeConfig = THUMBNAIL_SIZES[thumbnailSize]
 
   return (
     <div 
@@ -205,12 +345,14 @@ function AssetsPanel() {
             <button
               onClick={() => setViewMode('grid')}
               className={`p-1 rounded ${viewMode === 'grid' ? 'bg-sf-dark-600' : ''}`}
+              title="Grid view"
             >
               <Grid className="w-3.5 h-3.5 text-sf-text-secondary" />
             </button>
             <button
               onClick={() => setViewMode('list')}
               className={`p-1 rounded ${viewMode === 'list' ? 'bg-sf-dark-600' : ''}`}
+              title="List view"
             >
               <List className="w-3.5 h-3.5 text-sf-text-secondary" />
             </button>
@@ -229,7 +371,93 @@ function AssetsPanel() {
             )}
           </button>
         </div>
+        
+        {/* Thumbnail size control (only in grid mode) */}
+        {viewMode === 'grid' && (
+          <div className="flex items-center gap-2">
+            <span className="text-[10px] text-sf-text-muted">Size:</span>
+            <div className="flex items-center gap-1 flex-1">
+              <Minus className="w-3 h-3 text-sf-text-muted" />
+              <input
+                type="range"
+                min="0"
+                max="2"
+                value={thumbnailSize === 'small' ? 0 : thumbnailSize === 'medium' ? 1 : 2}
+                onChange={(e) => {
+                  const sizes = ['small', 'medium', 'large']
+                  setAndSaveThumbnailSize(sizes[parseInt(e.target.value)])
+                }}
+                className="flex-1 h-1 bg-sf-dark-600 rounded-lg appearance-none cursor-pointer accent-sf-accent"
+              />
+              <Plus className="w-3 h-3 text-sf-text-muted" />
+            </div>
+            <button
+              onClick={() => setShowNewFolderInput(true)}
+              className="p-1 hover:bg-sf-dark-700 rounded transition-colors"
+              title="New Folder"
+            >
+              <FolderPlus className="w-3.5 h-3.5 text-sf-text-secondary" />
+            </button>
+          </div>
+        )}
+        
+        {/* Folder breadcrumb navigation */}
+        {(currentFolderId || subFolders.length > 0 || folders?.length > 0) && (
+          <div className="flex items-center gap-1 text-[10px] overflow-x-auto">
+            <button
+              onClick={() => setCurrentFolderId(null)}
+              className={`flex items-center gap-0.5 px-1.5 py-0.5 rounded hover:bg-sf-dark-700 transition-colors ${
+                !currentFolderId ? 'text-sf-accent' : 'text-sf-text-muted'
+              }`}
+            >
+              <Home className="w-3 h-3" />
+              <span>Root</span>
+            </button>
+            {getFolderPath().map((folder, idx) => (
+              <div key={folder.id} className="flex items-center">
+                <ChevronRight className="w-3 h-3 text-sf-text-muted" />
+                <button
+                  onClick={() => setCurrentFolderId(folder.id)}
+                  className={`px-1.5 py-0.5 rounded hover:bg-sf-dark-700 transition-colors ${
+                    folder.id === currentFolderId ? 'text-sf-accent' : 'text-sf-text-muted'
+                  }`}
+                >
+                  {folder.name}
+                </button>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
+      
+      {/* New folder input */}
+      {showNewFolderInput && (
+        <div className="px-2 py-1.5 border-b border-sf-dark-700 flex items-center gap-2">
+          <FolderPlus className="w-3.5 h-3.5 text-sf-accent" />
+          <input
+            ref={newFolderInputRef}
+            type="text"
+            placeholder="Folder name..."
+            value={newFolderName}
+            onChange={(e) => setNewFolderName(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === 'Enter') handleCreateFolder()
+              if (e.key === 'Escape') setShowNewFolderInput(false)
+            }}
+            onBlur={() => {
+              if (!newFolderName.trim()) setShowNewFolderInput(false)
+            }}
+            className="flex-1 bg-sf-dark-800 border border-sf-accent rounded px-2 py-0.5 text-xs text-sf-text-primary placeholder-sf-text-muted focus:outline-none"
+          />
+          <button
+            onClick={handleCreateFolder}
+            disabled={!newFolderName.trim()}
+            className="px-2 py-0.5 bg-sf-accent text-white text-[10px] rounded disabled:opacity-50"
+          >
+            Create
+          </button>
+        </div>
+      )}
       
       {/* Drag overlay */}
       {isDragOver && (
@@ -244,22 +472,66 @@ function AssetsPanel() {
       
       {/* Assets Grid/List */}
       <div className="flex-1 p-2 overflow-auto relative">
-        {filteredAssets.length === 0 ? (
+        {filteredAssets.length === 0 && subFolders.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center text-sf-text-muted">
             <Video className="w-10 h-10 mb-2 opacity-50" />
             <p className="text-xs">No assets yet</p>
             <p className="text-[10px] mt-1">Generate AI videos or import your footage</p>
-            <button
-              onClick={openFilePicker}
-              disabled={!currentProjectHandle}
-              className="mt-3 flex items-center gap-1.5 px-3 py-1.5 bg-sf-dark-700 hover:bg-sf-dark-600 disabled:opacity-50 rounded text-xs text-sf-text-secondary transition-colors"
-            >
-              <Upload className="w-3 h-3" />
-              Import Media
-            </button>
+            <div className="flex gap-2 mt-3">
+              <button
+                onClick={openFilePicker}
+                disabled={!currentProjectHandle}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-sf-dark-700 hover:bg-sf-dark-600 disabled:opacity-50 rounded text-xs text-sf-text-secondary transition-colors"
+              >
+                <Upload className="w-3 h-3" />
+                Import Media
+              </button>
+              <button
+                onClick={() => setShowNewFolderInput(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-sf-dark-700 hover:bg-sf-dark-600 rounded text-xs text-sf-text-secondary transition-colors"
+              >
+                <FolderPlus className="w-3 h-3" />
+                New Folder
+              </button>
+            </div>
           </div>
         ) : viewMode === 'grid' ? (
-          <div className="grid grid-cols-2 gap-2">
+          <div className={`grid gap-2`} style={{ gridTemplateColumns: `repeat(${sizeConfig.cols}, minmax(0, 1fr))` }}>
+            {/* Back button if in a folder */}
+            {currentFolderId && (
+              <button
+                onClick={() => setCurrentFolderId(currentFolder?.parentId || null)}
+                className="aspect-video bg-sf-dark-800 border border-sf-dark-600 rounded flex flex-col items-center justify-center hover:border-sf-dark-500 transition-colors"
+              >
+                <ChevronLeft className={`${sizeConfig.iconSize} text-sf-text-muted mb-1`} />
+                <span className={`${sizeConfig.nameSize} text-sf-text-muted`}>Back</span>
+              </button>
+            )}
+            
+            {/* Subfolders */}
+            {subFolders.map((folder) => (
+              <div
+                key={folder.id}
+                onClick={() => handleFolderClick(folder.id)}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  if (confirm(`Delete folder "${folder.name}"?`)) {
+                    removeFolder(folder.id)
+                  }
+                }}
+                className="aspect-video bg-sf-dark-800 border border-sf-dark-600 rounded flex flex-col items-center justify-center cursor-pointer hover:border-sf-dark-500 transition-colors group"
+              >
+                <FolderOpen className={`${sizeConfig.iconSize} text-amber-400 mb-1`} />
+                <span className={`${sizeConfig.nameSize} text-sf-text-primary truncate max-w-full px-1`}>
+                  {folder.name}
+                </span>
+                <span className={`${sizeConfig.infoSize} text-sf-text-muted`}>
+                  {assets.filter(a => a.folderId === folder.id).length} items
+                </span>
+              </div>
+            ))}
+            
+            {/* Assets */}
             {filteredAssets.map((asset) => {
               const Icon = getIcon(asset.type)
               const isSelected = currentPreview?.id === asset.id
@@ -274,6 +546,7 @@ function AssetsPanel() {
                   }}
                   onClick={() => handleClick(asset)}
                   onDoubleClick={() => handleDoubleClick(asset)}
+                  onContextMenu={(e) => handleContextMenu(e, asset.id)}
                   className={`bg-sf-dark-800 border rounded overflow-hidden cursor-grab transition-all group ${
                     isSelected 
                       ? 'border-sf-accent ring-1 ring-sf-accent' 
@@ -300,19 +573,19 @@ function AssetsPanel() {
                         className="w-full h-full object-cover"
                       />
                     ) : (
-                      <Icon className="w-6 h-6 text-sf-text-muted" />
+                      <Icon className={`${sizeConfig.iconSize} text-sf-text-muted`} />
                     )}
                     
-                    {/* Badge - AI or Imported */}
-                    <div className={`absolute top-0.5 left-0.5 px-1 py-0.5 rounded text-[7px] text-white font-medium ${
-                      asset.isImported ? 'bg-sf-dark-700/90' : 'bg-sf-accent/90'
+                    {/* Badge - AI, Imported, or Mask */}
+                    <div className={`absolute top-0.5 left-0.5 px-1 py-0.5 rounded ${sizeConfig.badgeSize} text-white font-medium ${
+                      asset.type === 'mask' ? 'bg-purple-600/90' : asset.isImported ? 'bg-sf-dark-700/90' : 'bg-sf-accent/90'
                     }`}>
-                      {asset.isImported ? 'IMP' : 'AI'}
+                      {asset.type === 'mask' ? 'MASK' : asset.isImported ? 'IMP' : 'AI'}
                     </div>
                     
                     {/* Play overlay on hover */}
                     <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                      <Play className="w-6 h-6 text-white" />
+                      <Play className={`${sizeConfig.playSize} text-white`} />
                     </div>
 
                     {/* Actions */}
@@ -344,16 +617,16 @@ function AssetsPanel() {
                           onChange={(e) => setEditName(e.target.value)}
                           onBlur={saveEdit}
                           autoFocus
-                          className="w-full bg-sf-dark-700 border border-sf-accent rounded px-1 py-0.5 text-[10px] text-sf-text-primary focus:outline-none"
+                          className={`w-full bg-sf-dark-700 border border-sf-accent rounded px-1 py-0.5 ${sizeConfig.nameSize} text-sf-text-primary focus:outline-none`}
                         />
                       </form>
                     ) : (
-                      <p className="text-[10px] text-sf-text-primary truncate" title={asset.name}>
+                      <p className={`${sizeConfig.nameSize} text-sf-text-primary truncate`} title={asset.name}>
                         {asset.name}
                       </p>
                     )}
-                    <p className="text-[9px] text-sf-text-muted mt-0.5">
-                      {formatTime(asset.createdAt)} • {asset.settings?.duration}s
+                    <p className={`${sizeConfig.infoSize} text-sf-text-muted mt-0.5`}>
+                      {formatTime(asset.createdAt)} • {asset.settings?.duration ? `${asset.settings.duration}s` : asset.type}
                     </p>
                   </div>
                 </div>
@@ -368,17 +641,55 @@ function AssetsPanel() {
             >
               <div className="text-center">
                 {isImporting ? (
-                  <Loader2 className="w-4 h-4 text-sf-text-muted mx-auto mb-1 animate-spin" />
+                  <Loader2 className={`${sizeConfig.iconSize} text-sf-text-muted mx-auto mb-1 animate-spin`} />
                 ) : (
-                  <Upload className="w-4 h-4 text-sf-text-muted mx-auto mb-1" />
+                  <Upload className={`${sizeConfig.iconSize} text-sf-text-muted mx-auto mb-1`} />
                 )}
-                <span className="text-[10px] text-sf-text-muted">Import</span>
+                <span className={`${sizeConfig.nameSize} text-sf-text-muted`}>Import</span>
               </div>
             </button>
           </div>
         ) : (
-          /* List View - Compact for narrow panel */
+          /* List View */
           <div className="space-y-1">
+            {/* Back button if in a folder */}
+            {currentFolderId && (
+              <button
+                onClick={() => setCurrentFolderId(currentFolder?.parentId || null)}
+                className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-sf-dark-800 transition-colors"
+              >
+                <ChevronLeft className="w-3.5 h-3.5 text-sf-text-muted" />
+                <span className="text-[11px] text-sf-text-muted">Back</span>
+              </button>
+            )}
+            
+            {/* Subfolders */}
+            {subFolders.map((folder) => (
+              <div 
+                key={folder.id}
+                onClick={() => handleFolderClick(folder.id)}
+                className="flex items-center gap-2 p-1.5 rounded cursor-pointer hover:bg-sf-dark-800 transition-colors group"
+              >
+                <FolderOpen className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
+                <div className="flex-1 min-w-0">
+                  <p className="text-[11px] text-sf-text-primary truncate">{folder.name}</p>
+                  <p className="text-[9px] text-sf-text-muted">{assets.filter(a => a.folderId === folder.id).length} items</p>
+                </div>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation()
+                    if (confirm(`Delete folder "${folder.name}"?`)) {
+                      removeFolder(folder.id)
+                    }
+                  }}
+                  className="p-0.5 opacity-0 group-hover:opacity-100 hover:bg-sf-error rounded transition-opacity"
+                >
+                  <Trash2 className="w-2.5 h-2.5 text-sf-text-muted" />
+                </button>
+              </div>
+            ))}
+            
+            {/* Assets */}
             {filteredAssets.map((asset) => {
               const Icon = getIcon(asset.type)
               const isSelected = currentPreview?.id === asset.id
@@ -393,6 +704,7 @@ function AssetsPanel() {
                   }}
                   onClick={() => handleClick(asset)}
                   onDoubleClick={() => handleDoubleClick(asset)}
+                  onContextMenu={(e) => handleContextMenu(e, asset.id)}
                   className={`flex items-center gap-2 p-1.5 rounded cursor-pointer transition-colors group ${
                     isSelected ? 'bg-sf-accent/20' : 'hover:bg-sf-dark-800'
                   }`}
@@ -413,7 +725,7 @@ function AssetsPanel() {
                     ) : (
                       <>
                         <p className="text-[11px] text-sf-text-primary truncate">{asset.name}</p>
-                        <p className="text-[9px] text-sf-text-muted">{formatTime(asset.createdAt)} • {asset.settings?.duration}s</p>
+                        <p className="text-[9px] text-sf-text-muted">{formatTime(asset.createdAt)} • {asset.settings?.duration ? `${asset.settings.duration}s` : asset.type}</p>
                       </>
                     )}
                   </div>
@@ -440,9 +752,80 @@ function AssetsPanel() {
         )}
       </div>
       
+      {/* Context Menu */}
+      {contextMenu && (
+        <div
+          className="fixed bg-sf-dark-800 border border-sf-dark-600 rounded-lg shadow-xl py-1 min-w-[160px] z-50"
+          style={{ left: contextMenu.x, top: contextMenu.y }}
+          onClick={(e) => e.stopPropagation()}
+        >
+          {/* Create Mask option - only for video/image */}
+          {(() => {
+            const asset = assets.find(a => a.id === contextMenu.assetId)
+            if (asset && canGenerateMask(asset)) {
+              return (
+                <>
+                  <button
+                    onClick={() => handleOpenMaskDialog(contextMenu.assetId)}
+                    className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
+                  >
+                    <Wand2 className="w-3 h-3 text-sf-accent" />
+                    Create Mask...
+                  </button>
+                  <div className="border-t border-sf-dark-600 my-1" />
+                </>
+              )
+            }
+            return null
+          })()}
+          
+          <div className="px-3 py-1 text-[10px] text-sf-text-muted uppercase tracking-wider">
+            Move to folder
+          </div>
+          <button
+            onClick={() => handleMoveToFolder(contextMenu.assetId, null)}
+            className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
+          >
+            <Home className="w-3 h-3" />
+            Root
+          </button>
+          {(folders || []).map((folder) => (
+            <button
+              key={folder.id}
+              onClick={() => handleMoveToFolder(contextMenu.assetId, folder.id)}
+              className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
+            >
+              <FolderOpen className="w-3 h-3 text-amber-400" />
+              {folder.name}
+            </button>
+          ))}
+        </div>
+      )}
+      
+      {/* Mask Generation Dialog */}
+      {maskDialogAsset && (
+        <MaskGenerationDialog
+          asset={maskDialogAsset}
+          onClose={() => setMaskDialogAsset(null)}
+          currentFolderId={currentFolderId}
+        />
+      )}
+      
       {/* Footer with asset count */}
-      <div className="px-2 py-1.5 border-t border-sf-dark-700 text-[10px] text-sf-text-muted">
-        {filteredAssets.length} {filteredAssets.length === 1 ? 'asset' : 'assets'}
+      <div className="px-2 py-1.5 border-t border-sf-dark-700 flex items-center justify-between">
+        <span className="text-[10px] text-sf-text-muted">
+          {filteredAssets.length} {filteredAssets.length === 1 ? 'asset' : 'assets'}
+          {subFolders.length > 0 && ` • ${subFolders.length} ${subFolders.length === 1 ? 'folder' : 'folders'}`}
+        </span>
+        {viewMode === 'list' && (
+          <button
+            onClick={() => setShowNewFolderInput(true)}
+            className="p-0.5 hover:bg-sf-dark-700 rounded transition-colors"
+            title="New Folder"
+          >
+            <FolderPlus className="w-3 h-3 text-sf-text-muted" />
+          </button>
+        )}
       </div>
     </div>
   )

@@ -1,13 +1,14 @@
-import { useState, useRef, useEffect } from 'react'
+import { useState, useRef, useEffect, useMemo } from 'react'
 import { 
   Volume2, VolumeX, Lock, Unlock, Eye, EyeOff, 
   Plus, Music, Mic, Video, Type, Image as ImageIcon,
   Sparkles, GripVertical, Magnet, ArrowRightLeft, Square, X, Check, Pencil,
-  Undo2, Redo2
+  Undo2, Redo2, Diamond
 } from 'lucide-react'
 import useTimelineStore from '../stores/timelineStore'
 import useAssetsStore from '../stores/assetsStore'
 import { useSnapping, SNAP_TYPES } from '../hooks/useSnapping'
+import { getAllKeyframeTimes } from '../utils/keyframes'
 
 function Timeline({ onOpenAudioGenerate }) {
   const timelineRef = useRef(null)
@@ -43,6 +44,11 @@ function Timeline({ onOpenAudioGenerate }) {
   
   // Roll edit state (dragging between two adjacent clips)
   const [rollEditState, setRollEditState] = useState(null) // { clipAId, clipBId, startX, originalEditPoint }
+  
+  // Spacebar panning state
+  const [isPanning, setIsPanning] = useState(false)
+  const [panStart, setPanStart] = useState(null) // { x, y, scrollLeft, scrollTop }
+  const [isSpaceHeld, setIsSpaceHeld] = useState(false)
   
   // Available transition types
   const TRANSITION_TYPES = [
@@ -113,7 +119,20 @@ function Timeline({ onOpenAudioGenerate }) {
   const { snapClipPosition, snapTrim, pixelsPerSecond: snapPixelsPerSecond } = useSnapping()
 
   // Assets store for drag & drop and preview mode
-  const { assets, currentPreview, setPreview, setPreviewMode } = useAssetsStore()
+  const { assets, currentPreview, setPreview, setPreviewMode, getAssetUrl, isPlaying: assetIsPlaying, setIsPlaying: setAssetIsPlaying } = useAssetsStore()
+  
+  // Helper to get clip URL - uses asset store URL if available (handles refreshed blob URLs)
+  const getClipUrl = (clip) => {
+    if (!clip) return null
+    if (clip.type === 'text') return null
+    // Try to get current URL from assets store (may have been regenerated after refresh)
+    if (clip.assetId) {
+      const assetUrl = getAssetUrl(clip.assetId)
+      if (assetUrl) return assetUrl
+    }
+    // Fallback to clip's stored URL
+    return clip.url
+  }
 
   // Pixels per second based on zoom
   const pixelsPerSecond = zoom / 5
@@ -140,9 +159,25 @@ function Timeline({ onOpenAudioGenerate }) {
     
     e.preventDefault()
     
+    // Check for spacebar held - start panning
+    if (isSpaceHeld) {
+      setIsPanning(true)
+      setPanStart({
+        x: e.clientX,
+        y: e.clientY,
+        scrollLeft: timelineRef.current?.scrollLeft || 0,
+        scrollTop: trackContentRef.current?.scrollTop || 0
+      })
+      return
+    }
+    
     // Switch to timeline preview mode when clicking on timeline
+    // Also pause asset playback if it's playing
     if (clips.length > 0) {
       setPreviewMode('timeline')
+      if (assetIsPlaying) {
+        setAssetIsPlaying(false)
+      }
     }
     
     // Check for Alt+Click to start marquee selection
@@ -168,8 +203,8 @@ function Timeline({ onOpenAudioGenerate }) {
     // Regular click - start scrubbing
     setIsScrubbing(true)
     
-    // Clear selection when clicking on empty space
-    clearSelection()
+    // Don't clear selection when clicking on empty space - keep showing last selected clip in inspector
+    // User can press Escape to explicitly clear selection if needed
     
     // Immediately move playhead to click position
     const time = getTimeFromMouseEvent(e)
@@ -333,6 +368,12 @@ function Timeline({ onOpenAudioGenerate }) {
       // Don't trigger if user is typing in an input
       if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') return
       
+      // Spacebar - enable panning mode (but don't prevent default if not in timeline)
+      if (e.code === 'Space' && !e.repeat) {
+        // Only enable panning if we're hovering over the timeline
+        setIsSpaceHeld(true)
+      }
+      
       // Ctrl/Cmd + Z - Undo
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && e.key === 'z') {
         e.preventDefault()
@@ -376,44 +417,99 @@ function Timeline({ onOpenAudioGenerate }) {
       }
     }
     
+    const handleKeyUp = (e) => {
+      // Release spacebar panning mode
+      if (e.code === 'Space') {
+        setIsSpaceHeld(false)
+        setIsPanning(false)
+        setPanStart(null)
+      }
+    }
+    
     window.addEventListener('keydown', handleKeyDown)
-    return () => window.removeEventListener('keydown', handleKeyDown)
+    window.addEventListener('keyup', handleKeyUp)
+    return () => {
+      window.removeEventListener('keydown', handleKeyDown)
+      window.removeEventListener('keyup', handleKeyUp)
+    }
   }, [toggleSnapping, toggleRippleEdit, selectedClipIds, removeSelectedClips, clearSelection, clips, undo, redo])
 
-  // Handle scroll wheel zoom
+  // Handle spacebar panning
+  useEffect(() => {
+    if (!isPanning || !panStart) return
+    
+    const handleMouseMove = (e) => {
+      if (!timelineRef.current || !trackContentRef.current) return
+      
+      const deltaX = e.clientX - panStart.x
+      const deltaY = e.clientY - panStart.y
+      
+      // Scroll the timeline horizontally
+      timelineRef.current.scrollLeft = panStart.scrollLeft - deltaX
+      
+      // Scroll the track content vertically (synced with headers)
+      trackContentRef.current.scrollTop = panStart.scrollTop - deltaY
+    }
+    
+    const handleMouseUp = () => {
+      setIsPanning(false)
+      setPanStart(null)
+    }
+    
+    window.addEventListener('mousemove', handleMouseMove)
+    window.addEventListener('mouseup', handleMouseUp)
+    
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove)
+      window.removeEventListener('mouseup', handleMouseUp)
+    }
+  }, [isPanning, panStart])
+
+  // Handle scroll wheel - Ctrl+Scroll to zoom, regular scroll to pan horizontally
   const handleWheel = (e) => {
-    // Only zoom if hovering over timeline content area
     if (!timelineRef.current) return
     
-    // Check if it's a zoom gesture (Ctrl/Cmd + scroll or just scroll)
-    const zoomDelta = e.deltaY > 0 ? -10 : 10 // Scroll down = zoom out, scroll up = zoom in
-    
-    // Get mouse position relative to timeline for zoom centering
-    const rect = timelineRef.current.getBoundingClientRect()
-    const mouseX = e.clientX - rect.left
-    const scrollLeft = timelineRef.current.scrollLeft
-    
-    // Calculate time position under mouse before zoom
-    const timeAtMouse = (mouseX + scrollLeft) / pixelsPerSecond
-    
-    // Apply zoom
-    const newZoom = Math.max(20, Math.min(2000, zoom + zoomDelta))
-    setZoom(newZoom)
-    
-    // Calculate new pixels per second
-    const newPixelsPerSecond = newZoom / 5
-    
-    // Adjust scroll to keep the time position under the mouse
-    const newScrollLeft = (timeAtMouse * newPixelsPerSecond) - mouseX
-    
-    // Apply scroll adjustment after a tiny delay to let the zoom render
-    requestAnimationFrame(() => {
-      if (timelineRef.current) {
-        timelineRef.current.scrollLeft = Math.max(0, newScrollLeft)
+    // Ctrl/Cmd + Scroll = Zoom (centered on mouse position)
+    if (e.ctrlKey || e.metaKey) {
+      e.preventDefault()
+      
+      // Zoom delta - scroll up = zoom in, scroll down = zoom out
+      const zoomDelta = e.deltaY > 0 ? -20 : 20
+      
+      // Get mouse position relative to timeline for zoom centering
+      const rect = timelineRef.current.getBoundingClientRect()
+      const mouseX = e.clientX - rect.left
+      const scrollLeft = timelineRef.current.scrollLeft
+      
+      // Calculate time position under mouse before zoom
+      const timeAtMouse = (mouseX + scrollLeft) / pixelsPerSecond
+      
+      // Apply zoom
+      const newZoom = Math.max(20, Math.min(2000, zoom + zoomDelta))
+      setZoom(newZoom)
+      
+      // Calculate new pixels per second
+      const newPixelsPerSecond = newZoom / 5
+      
+      // Adjust scroll to keep the time position under the mouse
+      const newScrollLeft = (timeAtMouse * newPixelsPerSecond) - mouseX
+      
+      // Apply scroll adjustment after a tiny delay to let the zoom render
+      requestAnimationFrame(() => {
+        if (timelineRef.current) {
+          timelineRef.current.scrollLeft = Math.max(0, newScrollLeft)
+        }
+      })
+    } else {
+      // Regular scroll = pan horizontally (and vertically if shift held)
+      // Allow native vertical scrolling for tracks, but also support horizontal
+      if (e.shiftKey) {
+        // Shift+Scroll = horizontal pan
+        e.preventDefault()
+        timelineRef.current.scrollLeft += e.deltaY
       }
-    })
-    
-    e.preventDefault()
+      // Otherwise let native scroll behavior handle it (vertical track scrolling)
+    }
   }
 
   // Handle drag over for drop zones
@@ -463,7 +559,11 @@ function Timeline({ onOpenAudioGenerate }) {
     e.stopPropagation()
     
     // Switch to timeline preview mode when clicking on a clip
+    // Also pause asset playback if it's playing
     setPreviewMode('timeline')
+    if (assetIsPlaying) {
+      setAssetIsPlaying(false)
+    }
     
     // Multi-select support
     const isShiftHeld = e.shiftKey
@@ -1246,7 +1346,7 @@ function Timeline({ onOpenAudioGenerate }) {
           </div>
           
           {/* Hints */}
-          <span className="text-[9px] text-sf-text-muted">Scroll=Zoom | Alt+Drag=Marquee</span>
+          <span className="text-[9px] text-sf-text-muted">Ctrl+Scroll=Zoom | Space+Drag=Pan | Alt+Drag=Marquee</span>
         </div>
       </div>
 
@@ -1477,7 +1577,11 @@ function Timeline({ onOpenAudioGenerate }) {
         {/* Track Content Area */}
         <div 
           ref={timelineRef}
-          className={`flex-1 overflow-x-auto overflow-y-hidden relative bg-sf-dark-900 flex flex-col ${isScrubbing ? 'cursor-ew-resize select-none' : ''}`}
+          className={`flex-1 overflow-x-auto overflow-y-hidden relative bg-sf-dark-900 flex flex-col ${
+            isPanning ? 'cursor-grabbing select-none' : 
+            isSpaceHeld ? 'cursor-grab' : 
+            isScrubbing ? 'cursor-ew-resize select-none' : ''
+          }`}
           onMouseDown={handleTimelineMouseDown}
           onWheel={handleWheel}
         >
@@ -1595,6 +1699,22 @@ function Timeline({ onOpenAudioGenerate }) {
                         <div className="absolute bottom-1 right-1 px-1 py-0.5 bg-black/60 rounded text-[8px] text-white/90 font-mono">
                           {clip.duration.toFixed(1)}s
                         </div>
+                        
+                        {/* Keyframe markers */}
+                        {clip.keyframes && Object.keys(clip.keyframes).length > 0 && (
+                          <div className="absolute bottom-[3px] left-0 right-0 h-2 pointer-events-none">
+                            {getAllKeyframeTimes(clip.keyframes).map((kf, i) => (
+                              <div
+                                key={`kf-${i}-${kf.time}`}
+                                className="absolute w-2 h-2 -translate-x-1/2"
+                                style={{ left: `${(kf.time / clip.duration) * 100}%` }}
+                                title={`Keyframe at ${kf.time.toFixed(2)}s: ${kf.properties.join(', ')}`}
+                              >
+                                <Diamond className="w-2 h-2 text-yellow-400 fill-yellow-400" />
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </>
                     ) : clip.type === 'image' ? (
                       <>
@@ -1608,10 +1728,10 @@ function Timeline({ onOpenAudioGenerate }) {
                         />
                         
                         {/* Single image thumbnail repeated */}
-                        {clip.url && (
+                        {getClipUrl(clip) && (
                           <div className="absolute inset-0 top-[3px] flex overflow-hidden">
                             <img
-                              src={clip.url}
+                              src={getClipUrl(clip)}
                               alt={clip.name}
                               className="h-full object-cover opacity-80 pointer-events-none"
                               style={{ 
@@ -1646,6 +1766,22 @@ function Timeline({ onOpenAudioGenerate }) {
                         <div className="absolute bottom-1 right-1 px-1 py-0.5 bg-black/60 rounded text-[8px] text-white/90 font-mono">
                           {clip.duration.toFixed(1)}s
                         </div>
+                        
+                        {/* Keyframe markers */}
+                        {clip.keyframes && Object.keys(clip.keyframes).length > 0 && (
+                          <div className="absolute bottom-[3px] left-0 right-0 h-2 pointer-events-none">
+                            {getAllKeyframeTimes(clip.keyframes).map((kf, i) => (
+                              <div
+                                key={`kf-${i}-${kf.time}`}
+                                className="absolute w-2 h-2 -translate-x-1/2"
+                                style={{ left: `${(kf.time / clip.duration) * 100}%` }}
+                                title={`Keyframe at ${kf.time.toFixed(2)}s: ${kf.properties.join(', ')}`}
+                              >
+                                <Diamond className="w-2 h-2 text-yellow-400 fill-yellow-400" />
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </>
                     ) : (
                       <>
@@ -1659,7 +1795,7 @@ function Timeline({ onOpenAudioGenerate }) {
                         />
                         
                         {/* Filmstrip thumbnails */}
-                        {clip.url && (
+                        {getClipUrl(clip) && (
                           <div className="absolute inset-0 top-[3px] flex overflow-hidden">
                             {Array.from({ length: thumbCount }).map((_, i) => (
                               <div 
@@ -1668,7 +1804,7 @@ function Timeline({ onOpenAudioGenerate }) {
                                 style={{ width: `${clipWidth / thumbCount}px` }}
                               >
                                 <video
-                                  src={clip.url}
+                                  src={getClipUrl(clip)}
                                   className="absolute inset-0 w-full h-full object-cover opacity-80 pointer-events-none"
                                   muted
                                   style={{
@@ -1696,6 +1832,22 @@ function Timeline({ onOpenAudioGenerate }) {
                         <div className="absolute bottom-1 right-1 px-1 py-0.5 bg-black/60 rounded text-[8px] text-white/90 font-mono">
                           {clip.duration.toFixed(1)}s
                         </div>
+                        
+                        {/* Keyframe markers */}
+                        {clip.keyframes && Object.keys(clip.keyframes).length > 0 && (
+                          <div className="absolute bottom-[3px] left-0 right-0 h-2 pointer-events-none">
+                            {getAllKeyframeTimes(clip.keyframes).map((kf, i) => (
+                              <div
+                                key={`kf-${i}-${kf.time}`}
+                                className="absolute w-2 h-2 -translate-x-1/2"
+                                style={{ left: `${(kf.time / clip.duration) * 100}%` }}
+                                title={`Keyframe at ${kf.time.toFixed(2)}s: ${kf.properties.join(', ')}`}
+                              >
+                                <Diamond className="w-2 h-2 text-yellow-400 fill-yellow-400" />
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </>
                     )}
                     

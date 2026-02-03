@@ -266,8 +266,10 @@ When a clip is selected:
 | `Delete` | Delete selected clips |
 | `Escape` | Clear selection |
 | `Ctrl+A` | Select all clips |
-| `Alt+Drag` | Marquee selection |
-| `Space+Drag` | Pan preview |
+| `Alt+Drag` | Marquee selection (timeline) |
+| `Space+Drag` | Pan (preview & timeline) |
+| `Ctrl+Scroll` | Zoom (preview & timeline) |
+| `Shift+Scroll` | Horizontal scroll (timeline) |
 
 ## Generate Panel Features
 - **Video Tab**: Prompt/negative prompt with cinematography tags (10 categories)
@@ -338,6 +340,81 @@ Letterbox shows black bars to visualize how content will appear in different del
 - **Full-height mode**: Left panel can expand to span entire height (Resolve-style)
 - **Draggable inputs**: Position X/Y, Anchor X/Y - click+drag to adjust, double-click to edit
 
+## Keyframing & Animation
+Clips support keyframe-based animation for transform properties.
+
+### Keyframeable Properties
+- Position X/Y
+- Scale X/Y
+- Rotation
+- Opacity
+- Anchor X/Y
+- Crop (Top, Bottom, Left, Right)
+
+### Easing Functions
+- `linear` - Constant speed
+- `easeIn` / `easeInCubic` - Slow start
+- `easeOut` / `easeOutCubic` - Slow end
+- `easeInOut` / `easeInOutCubic` - Slow start and end
+- `hold` - No interpolation (jump to value)
+
+### Keyframe Data Structure
+```javascript
+clip.keyframes = {
+  positionX: [
+    { time: 0, value: 0, easing: 'easeInOut' },
+    { time: 2.5, value: 100, easing: 'linear' },
+  ],
+  opacity: [
+    { time: 0, value: 100, easing: 'easeIn' },
+    { time: 1, value: 0, easing: 'linear' },
+  ],
+}
+```
+- `time` = seconds relative to clip start
+- `value` = property value at that time
+- `easing` = interpolation to next keyframe
+
+### Inspector UI
+Each keyframeable property has a **diamond button**:
+- **Yellow filled (◆)** = Keyframe exists at current playhead position
+- **Blue outline (◇)** = Property has keyframes, but not at current time
+- **Gray (◇)** = No keyframes for this property
+
+Click diamond to toggle keyframe at playhead. Use **◀ ▶** arrows to jump between keyframes.
+
+### Timeline Markers
+Clips with keyframes show **yellow diamond markers** at keyframe positions on the timeline.
+
+### Key Files
+| File | Purpose |
+|------|---------|
+| `src/utils/keyframes.js` | Interpolation, easing functions, utilities |
+| `src/stores/timelineStore.js` | Keyframe CRUD operations |
+| `src/components/VideoLayerRenderer.jsx` | Animated transform evaluation |
+| `src/components/InspectorPanel.jsx` | Keyframe toggle buttons |
+| `src/components/Timeline.jsx` | Keyframe diamond markers on clips |
+
+### Store Functions
+```javascript
+// Add/update keyframe
+setKeyframe(clipId, property, time, value, easing)
+
+// Remove keyframe
+removeKeyframe(clipId, property, time)
+
+// Toggle keyframe at playhead
+toggleKeyframe(clipId, property)
+
+// Navigate keyframes
+goToNextKeyframe(clipId, property)
+goToPrevKeyframe(clipId, property)
+
+// Clear keyframes
+clearPropertyKeyframes(clipId, property)
+clearAllKeyframes(clipId)
+```
+
 ## Pending Features
 - [ ] Keyboard: C (split), Ctrl+D (duplicate)
 - [ ] Copy/Paste clips
@@ -345,10 +422,31 @@ Letterbox shows black bars to visualize how content will appear in different del
 - [ ] Audio waveforms
 - [ ] Export to video file
 - [ ] Text animation presets
+- [ ] Keyframe easing editor (curve UI)
+- [ ] Keyframe copy/paste
 
 ---
 
 ## Recent Changes Log
+
+### Keyframing Feature (Feb 2026)
+Added keyframe-based animation for transform properties.
+
+**New Files:**
+- `src/utils/keyframes.js` - Easing functions, interpolation utilities
+
+**Modified Files:**
+- `src/stores/timelineStore.js` - Added keyframe CRUD functions
+- `src/components/VideoLayerRenderer.jsx` - Uses `getAnimatedTransform()` for animated values
+- `src/components/InspectorPanel.jsx` - KeyframeButton component, animated value display
+- `src/components/Timeline.jsx` - Yellow diamond markers on clips with keyframes
+
+**How It Works:**
+1. Select a clip and move playhead to desired time
+2. Click diamond button (◆) next to a property to add keyframe
+3. Move playhead, change value, click diamond again
+4. Play timeline to see interpolated animation
+5. Values smoothly transition between keyframes using selected easing
 
 ### Session Updates (Feb 2026)
 
@@ -389,6 +487,41 @@ Letterbox shows black bars to visualize how content will appear in different del
 - Warning message if WebSocket unavailable
 - Files: `comfyui.js`, `useComfyUI.js`, `GeneratePanel.jsx`
 
+### Session Updates (Feb 3, 2026)
+
+**Linked Scale Keyframe Fix:**
+- When `scaleLinked` is true and you add/remove a scale keyframe, it now creates/removes keyframes for BOTH `scaleX` and `scaleY`
+- Previously only `scaleX` would get a keyframe when using the diamond button with linked scale
+- Files: `src/stores/timelineStore.js` (toggleKeyframe function), `src/components/InspectorPanel.jsx` (handleTransformChange)
+
+**Timeline Panning (Space+Drag):**
+- Hold **Spacebar** and drag to pan the timeline horizontally and vertically
+- Cursor changes to grab hand when spacebar is held
+- Similar to panning in Premiere Pro, DaVinci Resolve, Photoshop
+- File: `src/components/Timeline.jsx`
+
+**Timeline Zoom (Ctrl+Scroll):**
+- **Ctrl+Scroll** (or Cmd+Scroll on Mac) to zoom in/out, centered on mouse position
+- **Shift+Scroll** to pan horizontally
+- Regular scroll handles vertical track scrolling
+- Hint in timeline header: `Ctrl+Scroll=Zoom | Space+Drag=Pan | Alt+Drag=Marquee`
+- File: `src/components/Timeline.jsx`
+
+**Asset URL Refresh Fix:**
+- Fixed broken images/videos in timeline after page refresh
+- Problem: Clips stored blob URLs that became invalid after refresh
+- Solution: Clips now look up current URL from assets store using `assetId`
+- Added `getAssetById()` and `getAssetUrl()` helpers to assetsStore
+- Added `useClipUrl()` hook in VideoLayerRenderer
+- Added `getClipUrl()` helper in Timeline
+- Files: `src/stores/assetsStore.js`, `src/components/VideoLayerRenderer.jsx`, `src/components/Timeline.jsx`
+
+**Inspector Selection Persistence:**
+- Clicking on empty timeline space or scrubbing playhead no longer clears clip selection
+- Inspector keeps showing the last selected clip
+- Press **Escape** to explicitly clear selection when needed
+- File: `src/components/Timeline.jsx`
+
 ### Color Theme Update (Feb 2026)
 Updated the app's color scheme to match DaVinci Resolve more closely.
 
@@ -421,6 +554,141 @@ Updated the app's color scheme to match DaVinci Resolve more closely.
 - Orange playhead matching Resolve's edit page
 - All accent colors desaturated by ~30% for professional look
 - Muted, functional colors that don't distract from content
+
+### Session Updates (Feb 3, 2026 - Continued)
+
+**Info Overlay Toggle:**
+- Preview panel now has an **Eye icon** in header to show/hide info overlay
+- Toggle shows/hides: resolution indicator, prompt overlay, timeline mode info
+- Setting persists to localStorage
+- File: `src/components/PreviewPanel.jsx`
+
+**Asset Information Display:**
+- When previewing an asset, detailed info shows in both:
+  - **Preview panel overlay**: Type badge (Video/Image/Audio), resolution, duration, file size, AI/IMP badge
+  - **Inspector panel**: Full asset details when no timeline clip is selected
+- Helper functions: `formatFileSize()`, `formatDuration()`, `formatDate()`, `getFileExtension()`
+- Files: `src/components/PreviewPanel.jsx`, `src/components/InspectorPanel.jsx`
+
+**Image Duration Flexibility:**
+- Images are no longer restricted to 5-second maximum
+- Images can be extended to any length on the timeline
+- `sourceDuration` set to `Infinity` for images
+- Default placement duration remains 5 seconds
+- File: `src/stores/timelineStore.js`
+
+**Preview Scrubber Bar (DaVinci Resolve-style):**
+- New scrubber bar below the main preview video
+- Shows current time, progress bar, and total duration
+- Draggable playhead for seeking
+- **Context-aware**: Controls asset when previewing an asset, controls timeline when in timeline mode
+- Files: `src/components/PreviewPanel.jsx`, `src/stores/assetsStore.js`
+
+**Preview Context Switching (Source/Program Monitor):**
+- Clicking an asset in Assets Panel switches preview to "asset mode"
+- Clicking on timeline or a clip switches back to "timeline mode"
+- Transport controls (play/pause/skip) follow the active preview mode
+- Scrubber bar follows the active preview mode
+- Asset videos start paused (not auto-playing or looping)
+- Files: `src/components/TransportControls.jsx`, `src/components/AssetsPanel.jsx`, `src/components/Timeline.jsx`, `src/stores/assetsStore.js`
+
+**Thumbnail Size Control:**
+- Slider in Assets Panel header to adjust thumbnail size
+- Three sizes: **Small** (3 columns), **Medium** (2 columns), **Large** (1 column)
+- Size persists to localStorage
+- Icons, badges, and text scale appropriately with size
+- File: `src/components/panels/AssetsPanel.jsx`
+
+**Folder Organization for Assets:**
+- Create folders to organize assets (click folder+ icon)
+- Navigate into folders by clicking them
+- Breadcrumb navigation shows path (Root > Folder > Subfolder)
+- Right-click asset to move it to a different folder
+- Delete folders (contents move to parent folder)
+- Nested folders supported
+- Folder count displayed in footer
+- Files: `src/components/panels/AssetsPanel.jsx`, `src/stores/assetsStore.js`
+
+**New Store Properties (assetsStore.js):**
+```javascript
+folders: [],              // Array of { id, name, parentId, createdAt }
+folderCounter: 1,         // Auto-increment for folder IDs
+previewMode: 'asset',     // 'asset' | 'timeline' - which context controls preview
+
+// New actions:
+addFolder({ name, parentId })
+removeFolder(folderId)
+renameFolder(folderId, newName)
+moveAssetToFolder(assetId, folderId)
+setPreviewMode(mode)
+```
+
+**Asset Data Structure Update:**
+```javascript
+asset: {
+  // ... existing fields ...
+  folderId: null | 'folder-1',  // Which folder this asset belongs to (null = root)
+}
+```
+
+### Session Updates (Feb 3, 2026 - Mask Generation Feature)
+
+**AI Mask Generation via ComfyUI SAM3:**
+- Generate masks from images/videos using text prompts (e.g., "person on the left", "red car")
+- Uses SAM3 (Segment Anything Model 3) + MatAnyone for refined edges
+- Right-click asset in Assets Panel → "Create Mask..."
+- Dialog with text prompt input, progress tracking, and sensitivity settings
+- Output: PNG mask (single image or sequence for videos)
+- Masks appear as new assets with purple "MASK" badge
+
+**Effects System:**
+- Clips now support an `effects` array for non-destructive effects
+- Mask effects can be applied to clips from the Inspector panel
+- Effects can be enabled/disabled, inverted, and removed
+- CSS `mask-image` property renders masks in real-time
+
+**New Files:**
+- `src/components/MaskGenerationDialog.jsx` - Mask generation UI
+- `public/workflows/mask_generation_text_prompt.json` - ComfyUI workflow
+
+**Modified Files:**
+| File | Changes |
+|------|---------|
+| `src/services/comfyui.js` | Added `uploadFile()`, `downloadImage()`, `downloadImageSequence()`, `modifyMaskWorkflow()` |
+| `src/hooks/useComfyUI.js` | Added `generateMask()`, `maskResult`, `clearMaskResult` |
+| `src/stores/assetsStore.js` | Added mask asset type, `addMaskAsset()`, `getMasksForAsset()`, `getAllMasks()` |
+| `src/stores/timelineStore.js` | Added effects system: `addEffect()`, `removeEffect()`, `updateEffect()`, `toggleEffect()`, `addMaskEffect()` |
+| `src/components/panels/AssetsPanel.jsx` | Added "Create Mask..." context menu option, mask badge styling |
+| `src/components/VideoLayerRenderer.jsx` | Added `useMaskEffectStyle()` hook for CSS mask rendering |
+| `src/components/InspectorPanel.jsx` | Replaced placeholder effects with functional mask effect controls |
+
+**Clip Effects Data Structure:**
+```javascript
+clip.effects = [
+  {
+    id: 'effect-1',
+    type: 'mask',
+    enabled: true,
+    maskAssetId: 'asset-123',
+    invertMask: false,
+    feather: 0,
+  }
+]
+```
+
+**Mask Asset Structure:**
+```javascript
+{
+  id: 'asset-123',
+  type: 'mask',
+  name: 'Person Mask',
+  sourceAssetId: 'asset-456',  // Links to original video/image
+  prompt: 'person on the left',
+  url: 'blob:...',  // Single frame URL
+  maskFrames: [...],  // For video masks (PNG sequence)
+  frameCount: 120,
+}
+```
 
 ---
 *Backup of previous version: `backUP01_PROJECT_SUMMARY.md`*

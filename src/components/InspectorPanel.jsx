@@ -1,13 +1,18 @@
-import { useState, useCallback, useRef, useEffect } from 'react'
+import { useState, useCallback, useRef, useEffect, useMemo } from 'react'
 import { 
   Move, RotateCw, Maximize2, Clock, Layers, Volume2, 
   ChevronDown, ChevronRight, ChevronLeft, Sparkles, Film,
   Zap, Eye, SlidersHorizontal,
   FlipHorizontal, FlipVertical, Link, Unlink, Crop,
   Anchor, RotateCcw, Type, AlignLeft, AlignCenter, AlignRight,
-  AlignVerticalJustifyStart, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd
+  AlignVerticalJustifyStart, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd,
+  Diamond, ChevronFirst, ChevronLast,
+  FileVideo, FileImage, FileAudio, HardDrive, Calendar, Info,
+  Wand2, Trash2, EyeOff, Plus
 } from 'lucide-react'
 import useTimelineStore from '../stores/timelineStore'
+import useAssetsStore from '../stores/assetsStore'
+import { getKeyframeAtTime, getAnimatedTransform, EASING_OPTIONS } from '../utils/keyframes'
 
 // Draggable number input component - click and drag to change value
 function DraggableNumberInput({ value, onChange, onCommit, min, max, step = 1, sensitivity = 0.5, suffix = '', className = '' }) {
@@ -126,19 +131,117 @@ const FONT_OPTIONS = [
   'Courier New', 'Verdana', 'Impact', 'Comic Sans MS', 'Trebuchet MS'
 ]
 
+/**
+ * Keyframe button component - shows diamond icon that can be clicked to toggle keyframes
+ * Yellow = keyframe at current time, Gray = no keyframe, Blue outline = property has keyframes
+ */
+function KeyframeButton({ clipId, property, clip, playheadPosition }) {
+  const { 
+    toggleKeyframe, 
+    goToNextKeyframe, 
+    goToPrevKeyframe,
+    hasKeyframes: checkHasKeyframes 
+  } = useTimelineStore()
+  
+  // Calculate clip-relative time
+  const clipTime = playheadPosition - (clip?.startTime || 0)
+  
+  // Check if keyframe exists at current time
+  const keyframes = clip?.keyframes?.[property] || []
+  const keyframeAtTime = getKeyframeAtTime(keyframes, clipTime, 0.05)
+  const hasKeyframesForProperty = keyframes.length > 0
+  
+  // Handle click - toggle keyframe at current position
+  const handleClick = (e) => {
+    e.stopPropagation()
+    toggleKeyframe(clipId, property)
+  }
+  
+  // Handle navigation to prev/next keyframe
+  const handlePrev = (e) => {
+    e.stopPropagation()
+    goToPrevKeyframe(clipId, property)
+  }
+  
+  const handleNext = (e) => {
+    e.stopPropagation()
+    goToNextKeyframe(clipId, property)
+  }
+  
+  return (
+    <div className="flex items-center gap-0.5 ml-1">
+      {/* Previous keyframe button */}
+      {hasKeyframesForProperty && (
+        <button
+          onClick={handlePrev}
+          className="p-0.5 hover:bg-sf-dark-600 rounded transition-colors opacity-60 hover:opacity-100"
+          title="Go to previous keyframe"
+        >
+          <ChevronFirst className="w-3 h-3 text-sf-text-muted" />
+        </button>
+      )}
+      
+      {/* Keyframe toggle button (diamond) */}
+      <button
+        onClick={handleClick}
+        className={`p-0.5 rounded transition-colors ${
+          keyframeAtTime 
+            ? 'bg-yellow-500/20 hover:bg-yellow-500/30' 
+            : hasKeyframesForProperty
+              ? 'bg-sf-dark-600 hover:bg-sf-dark-500 ring-1 ring-sf-blue/50'
+              : 'hover:bg-sf-dark-600'
+        }`}
+        title={keyframeAtTime ? 'Remove keyframe' : 'Add keyframe'}
+      >
+        <Diamond 
+          className={`w-3 h-3 ${
+            keyframeAtTime 
+              ? 'text-yellow-400 fill-yellow-400' 
+              : hasKeyframesForProperty
+                ? 'text-sf-blue'
+                : 'text-sf-text-muted'
+          }`} 
+        />
+      </button>
+      
+      {/* Next keyframe button */}
+      {hasKeyframesForProperty && (
+        <button
+          onClick={handleNext}
+          className="p-0.5 hover:bg-sf-dark-600 rounded transition-colors opacity-60 hover:opacity-100"
+          title="Go to next keyframe"
+        >
+          <ChevronLast className="w-3 h-3 text-sf-text-muted" />
+        </button>
+      )}
+    </div>
+  )
+}
+
 function InspectorPanel({ isExpanded, onToggleExpanded }) {
   const [expandedSections, setExpandedSections] = useState(['transform', 'crop', 'timing', 'effects', 'text', 'style'])
+  const [showMaskPicker, setShowMaskPicker] = useState(false)
   
   // Get selected clip from timeline store
   const { 
     selectedClipIds, 
     clips, 
     tracks,
+    playheadPosition,
     updateClipTransform, 
     resetClipTransform,
     updateTextProperties,
     removeClip,
-    resizeClip
+    resizeClip,
+    toggleKeyframe,
+    setKeyframe,
+    // Effects
+    addEffect,
+    removeEffect,
+    updateEffect,
+    toggleEffect,
+    addMaskEffect,
+    getClipEffects,
   } = useTimelineStore()
   
   // Get the first selected clip (for now, single selection for inspector)
@@ -170,11 +273,41 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
   
   const transform = getTransform()
   
+  // Calculate clip-relative time for keyframes
+  const clipTime = selectedClip ? playheadPosition - selectedClip.startTime : 0
+  
+  // Get animated transform values (with keyframes applied)
+  const animatedTransform = useMemo(() => {
+    if (!selectedClip) return transform
+    return getAnimatedTransform(selectedClip, clipTime) || transform
+  }, [selectedClip, clipTime, transform])
+  
+  // Check if a property has keyframes
+  const propertyHasKeyframes = useCallback((property) => {
+    return selectedClip?.keyframes?.[property]?.length > 0
+  }, [selectedClip])
+  
   // Update transform handler (doesn't save to history for realtime sliders)
+  // Also adds/updates keyframe if property is keyframed
   const handleTransformChange = useCallback((key, value) => {
     if (!selectedClip) return
     updateClipTransform(selectedClip.id, { [key]: value }, false)
-  }, [selectedClip, updateClipTransform])
+    
+    // If this property has keyframes, also update the keyframe at current time
+    if (propertyHasKeyframes(key)) {
+      setKeyframe(selectedClip.id, key, clipTime, value)
+    }
+    
+    // Handle linked scale: if scaleX or scaleY changes and scale is linked, also update the other
+    const isScaleProperty = key === 'scaleX' || key === 'scaleY'
+    const isLinked = transform?.scaleLinked && isScaleProperty
+    if (isLinked) {
+      const otherKey = key === 'scaleX' ? 'scaleY' : 'scaleX'
+      if (propertyHasKeyframes(otherKey)) {
+        setKeyframe(selectedClip.id, otherKey, clipTime, value)
+      }
+    }
+  }, [selectedClip, updateClipTransform, propertyHasKeyframes, setKeyframe, clipTime, transform])
   
   // Save to history when user finishes editing (on blur or mouse up)
   const handleTransformCommit = useCallback((key, value) => {
@@ -270,10 +403,18 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
               </label>
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-[9px] text-sf-text-muted block mb-0.5">X</label>
+                  <div className="flex items-center justify-between mb-0.5">
+                    <label className="text-[9px] text-sf-text-muted">X</label>
+                    <KeyframeButton 
+                      clipId={selectedClip?.id} 
+                      property="positionX" 
+                      clip={selectedClip}
+                      playheadPosition={playheadPosition}
+                    />
+                  </div>
                   <div className="flex items-center">
                     <DraggableNumberInput
-                      value={transform.positionX}
+                      value={animatedTransform?.positionX ?? transform.positionX}
                       onChange={(val) => handleTransformChange('positionX', val)}
                       onCommit={(val) => handleTransformCommit('positionX', val)}
                       step={1}
@@ -283,10 +424,18 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                   </div>
                 </div>
                 <div>
-                  <label className="text-[9px] text-sf-text-muted block mb-0.5">Y</label>
+                  <div className="flex items-center justify-between mb-0.5">
+                    <label className="text-[9px] text-sf-text-muted">Y</label>
+                    <KeyframeButton 
+                      clipId={selectedClip?.id} 
+                      property="positionY" 
+                      clip={selectedClip}
+                      playheadPosition={playheadPosition}
+                    />
+                  </div>
                   <div className="flex items-center">
                     <DraggableNumberInput
-                      value={transform.positionY}
+                      value={animatedTransform?.positionY ?? transform.positionY}
                       onChange={(val) => handleTransformChange('positionY', val)}
                       onCommit={(val) => handleTransformCommit('positionY', val)}
                       step={1}
@@ -304,13 +453,21 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                 <label className="text-[10px] text-sf-text-muted flex items-center gap-1">
                   <Maximize2 className="w-3 h-3" /> Scale
                 </label>
-                <button
-                  onClick={() => handleTransformCommit('scaleLinked', !transform.scaleLinked)}
-                  className={`p-1 rounded transition-colors ${transform.scaleLinked ? 'bg-sf-accent/30 text-sf-accent' : 'hover:bg-sf-dark-700 text-sf-text-muted'}`}
-                  title={transform.scaleLinked ? 'Unlink X/Y Scale' : 'Link X/Y Scale'}
-                >
-                  {transform.scaleLinked ? <Link className="w-3 h-3" /> : <Unlink className="w-3 h-3" />}
-                </button>
+                <div className="flex items-center gap-1">
+                  <KeyframeButton 
+                    clipId={selectedClip?.id} 
+                    property="scaleX" 
+                    clip={selectedClip}
+                    playheadPosition={playheadPosition}
+                  />
+                  <button
+                    onClick={() => handleTransformCommit('scaleLinked', !transform.scaleLinked)}
+                    className={`p-1 rounded transition-colors ${transform.scaleLinked ? 'bg-sf-accent/30 text-sf-accent' : 'hover:bg-sf-dark-700 text-sf-text-muted'}`}
+                    title={transform.scaleLinked ? 'Unlink X/Y Scale' : 'Link X/Y Scale'}
+                  >
+                    {transform.scaleLinked ? <Link className="w-3 h-3" /> : <Unlink className="w-3 h-3" />}
+                  </button>
+                </div>
               </div>
               
               {transform.scaleLinked ? (
@@ -318,13 +475,13 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                 <div>
                   <div className="flex justify-between mb-1">
                     <span className="text-[9px] text-sf-text-muted">Uniform</span>
-                    <span className="text-[10px] text-sf-text-secondary">{transform.scaleX}%</span>
+                    <span className="text-[10px] text-sf-text-secondary">{Math.round(animatedTransform?.scaleX ?? transform.scaleX)}%</span>
                   </div>
                   <input
                     type="range"
                     min="10"
                     max="400"
-                    value={transform.scaleX}
+                    value={animatedTransform?.scaleX ?? transform.scaleX}
                     onChange={(e) => handleTransformChange('scaleX', parseInt(e.target.value))}
                     onMouseUp={(e) => handleTransformCommit('scaleX', parseInt(e.target.value))}
                     className="w-full h-1 bg-sf-dark-600 rounded-lg appearance-none cursor-pointer accent-sf-accent"
@@ -336,7 +493,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                   <div>
                     <div className="flex justify-between mb-1">
                       <span className="text-[9px] text-sf-text-muted">Width (X)</span>
-                      <span className="text-[10px] text-sf-text-secondary">{transform.scaleX}%</span>
+                      <span className="text-[10px] text-sf-text-secondary">{Math.round(animatedTransform?.scaleX ?? transform.scaleX)}%</span>
                     </div>
                     <input
                       type="range"
@@ -369,14 +526,20 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
 
             {/* Rotation */}
             <div>
-              <div className="flex justify-between mb-1">
+              <div className="flex justify-between items-center mb-1">
                 <label className="text-[10px] text-sf-text-muted flex items-center gap-1">
                   <RotateCw className="w-3 h-3" /> Rotation
                 </label>
                 <div className="flex items-center gap-1">
+                  <KeyframeButton 
+                    clipId={selectedClip?.id} 
+                    property="rotation" 
+                    clip={selectedClip}
+                    playheadPosition={playheadPosition}
+                  />
                   <input
                     type="number"
-                    value={transform.rotation}
+                    value={Math.round(animatedTransform?.rotation ?? transform.rotation)}
                     onChange={(e) => handleTransformChange('rotation', parseFloat(e.target.value) || 0)}
                     onBlur={(e) => handleTransformCommit('rotation', parseFloat(e.target.value) || 0)}
                     className="w-14 bg-sf-dark-700 border border-sf-dark-600 rounded px-1.5 py-0.5 text-[10px] text-sf-text-primary focus:outline-none focus:border-sf-accent text-right"
@@ -388,7 +551,7 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
                 type="range"
                 min="-180"
                 max="180"
-                value={transform.rotation}
+                value={animatedTransform?.rotation ?? transform.rotation}
                 onChange={(e) => handleTransformChange('rotation', parseInt(e.target.value))}
                 onMouseUp={(e) => handleTransformCommit('rotation', parseInt(e.target.value))}
                 className="w-full h-1 bg-sf-dark-600 rounded-lg appearance-none cursor-pointer accent-sf-accent"
@@ -426,17 +589,25 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
 
             {/* Opacity */}
             <div>
-              <div className="flex justify-between mb-1">
+              <div className="flex justify-between items-center mb-1">
                 <label className="text-[10px] text-sf-text-muted flex items-center gap-1">
                   <Eye className="w-3 h-3" /> Opacity
                 </label>
-                <span className="text-[10px] text-sf-text-secondary">{transform.opacity}%</span>
+                <div className="flex items-center gap-1">
+                  <KeyframeButton 
+                    clipId={selectedClip?.id} 
+                    property="opacity" 
+                    clip={selectedClip}
+                    playheadPosition={playheadPosition}
+                  />
+                  <span className="text-[10px] text-sf-text-secondary">{Math.round(animatedTransform?.opacity ?? transform.opacity)}%</span>
+                </div>
               </div>
               <input
                 type="range"
                 min="0"
                 max="100"
-                value={transform.opacity}
+                value={animatedTransform?.opacity ?? transform.opacity}
                 onChange={(e) => handleTransformChange('opacity', parseInt(e.target.value))}
                 onMouseUp={(e) => handleTransformCommit('opacity', parseInt(e.target.value))}
                 className="w-full h-1 bg-sf-dark-600 rounded-lg appearance-none cursor-pointer accent-sf-accent"
@@ -675,21 +846,144 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
         {renderSectionHeader('effects', 'Effects', Zap)}
         {expandedSections.includes('effects') && (
           <div className="p-3 space-y-2 border-b border-sf-dark-700">
-            <button className="w-full flex items-center justify-between px-3 py-2 bg-sf-dark-700 hover:bg-sf-dark-600 rounded text-xs text-sf-text-secondary transition-colors">
-              <span>Ken Burns (Slow Zoom)</span>
-              <ChevronRight className="w-3 h-3" />
-            </button>
-            <button className="w-full flex items-center justify-between px-3 py-2 bg-sf-dark-700 hover:bg-sf-dark-600 rounded text-xs text-sf-text-secondary transition-colors">
-              <span>Camera Shake</span>
-              <ChevronRight className="w-3 h-3" />
-            </button>
-            <button className="w-full flex items-center justify-between px-3 py-2 bg-sf-dark-700 hover:bg-sf-dark-600 rounded text-xs text-sf-text-secondary transition-colors">
-              <span>Color Grade</span>
-              <ChevronRight className="w-3 h-3" />
-            </button>
-            <button className="w-full py-2 border border-dashed border-sf-dark-600 rounded text-xs text-sf-text-muted hover:border-sf-dark-500 transition-colors">
-              + Add Effect
-            </button>
+            {/* Render existing effects */}
+            {(selectedClip.effects || []).map((effect, index) => (
+              <div key={effect.id} className="bg-sf-dark-800 rounded overflow-hidden">
+                {/* Effect Header */}
+                <div className="flex items-center gap-2 px-2 py-1.5 bg-sf-dark-700">
+                  <button
+                    onClick={() => toggleEffect(selectedClip.id, effect.id)}
+                    className={`p-1 rounded transition-colors ${
+                      effect.enabled ? 'text-purple-400' : 'text-sf-text-muted'
+                    }`}
+                    title={effect.enabled ? 'Disable effect' : 'Enable effect'}
+                  >
+                    {effect.enabled ? <Eye className="w-3 h-3" /> : <EyeOff className="w-3 h-3" />}
+                  </button>
+                  <span className="flex-1 text-xs text-sf-text-primary capitalize">
+                    {effect.type === 'mask' ? 'Mask' : effect.type}
+                  </span>
+                  <button
+                    onClick={() => removeEffect(selectedClip.id, effect.id)}
+                    className="p-1 hover:bg-sf-dark-600 rounded text-sf-text-muted hover:text-sf-error transition-colors"
+                    title="Remove effect"
+                  >
+                    <Trash2 className="w-3 h-3" />
+                  </button>
+                </div>
+                
+                {/* Mask Effect Controls */}
+                {effect.type === 'mask' && effect.enabled && (
+                  <div className="p-2 space-y-2">
+                    {/* Mask Asset Info */}
+                    {(() => {
+                      const maskAsset = getAssetById(effect.maskAssetId)
+                      return maskAsset ? (
+                        <div className="flex items-center gap-2 p-2 bg-sf-dark-900 rounded">
+                          <Wand2 className="w-3.5 h-3.5 text-purple-400" />
+                          <div className="flex-1 min-w-0">
+                            <p className="text-[10px] text-sf-text-primary truncate">{maskAsset.name}</p>
+                            <p className="text-[9px] text-sf-text-muted">
+                              {maskAsset.frameCount > 1 ? `${maskAsset.frameCount} frames` : 'Single frame'}
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-[10px] text-sf-text-muted p-2 bg-sf-dark-900 rounded">
+                          Mask asset not found
+                        </div>
+                      )
+                    })()}
+                    
+                    {/* Invert Toggle */}
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-sf-text-secondary">Invert Mask</span>
+                      <button
+                        onClick={() => updateEffect(selectedClip.id, effect.id, { invertMask: !effect.invertMask }, true)}
+                        className={`w-8 h-4 rounded-full transition-colors ${
+                          effect.invertMask ? 'bg-purple-500' : 'bg-sf-dark-600'
+                        }`}
+                      >
+                        <div className={`w-3 h-3 rounded-full bg-white transition-transform ${
+                          effect.invertMask ? 'translate-x-4' : 'translate-x-0.5'
+                        }`} />
+                      </button>
+                    </div>
+                    
+                    {/* Feather (future implementation) */}
+                    {/* <div className="flex items-center justify-between">
+                      <span className="text-[10px] text-sf-text-secondary">Feather</span>
+                      <input
+                        type="range"
+                        min="0"
+                        max="20"
+                        value={effect.feather || 0}
+                        onChange={(e) => updateEffect(selectedClip.id, effect.id, { feather: parseInt(e.target.value) })}
+                        className="w-20 h-1 bg-sf-dark-600 rounded-lg appearance-none cursor-pointer accent-purple-500"
+                      />
+                    </div> */}
+                  </div>
+                )}
+              </div>
+            ))}
+            
+            {/* Add Mask Effect Button */}
+            {availableMasks.length > 0 && (
+              <div className="relative">
+                <button
+                  onClick={() => setShowMaskPicker(!showMaskPicker)}
+                  className="w-full flex items-center justify-center gap-2 py-2 border border-dashed border-purple-500/50 rounded text-xs text-purple-400 hover:border-purple-500 hover:bg-purple-500/10 transition-colors"
+                >
+                  <Wand2 className="w-3 h-3" />
+                  Add Mask Effect
+                </button>
+                
+                {/* Mask Picker Dropdown */}
+                {showMaskPicker && (
+                  <div className="absolute top-full left-0 right-0 mt-1 bg-sf-dark-800 border border-sf-dark-600 rounded-lg shadow-xl z-10 max-h-48 overflow-auto">
+                    <div className="p-2 border-b border-sf-dark-600">
+                      <span className="text-[10px] text-sf-text-muted uppercase tracking-wider">Select Mask</span>
+                    </div>
+                    {availableMasks.map(mask => (
+                      <button
+                        key={mask.id}
+                        onClick={() => {
+                          addMaskEffect(selectedClip.id, mask.id)
+                          setShowMaskPicker(false)
+                        }}
+                        className="w-full flex items-center gap-2 px-3 py-2 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 transition-colors"
+                      >
+                        <Layers className="w-3.5 h-3.5 text-purple-400" />
+                        <div className="flex-1 min-w-0">
+                          <p className="truncate">{mask.name}</p>
+                          <p className="text-[9px] text-sf-text-muted">
+                            {mask.prompt ? `"${mask.prompt}"` : 'No prompt'}
+                          </p>
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {/* No masks available message */}
+            {availableMasks.length === 0 && (selectedClip.effects || []).length === 0 && (
+              <div className="text-center py-3">
+                <Wand2 className="w-6 h-6 text-sf-text-muted mx-auto mb-2 opacity-50" />
+                <p className="text-[10px] text-sf-text-muted">No effects applied</p>
+                <p className="text-[9px] text-sf-text-muted mt-1">
+                  Generate masks from the Assets panel
+                </p>
+              </div>
+            )}
+            
+            {/* Placeholder for future effects */}
+            <div className="pt-2 border-t border-sf-dark-600">
+              <p className="text-[9px] text-sf-text-muted text-center">
+                More effects coming soon
+              </p>
+            </div>
           </div>
         )}
       </>
@@ -1209,16 +1503,262 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
     </>
   )
 
+  // Get current preview and mask assets from assets store
+  const { currentPreview, previewMode, assets, getAssetById, getAllMasks } = useAssetsStore()
+  
+  // Get available mask assets for the effect picker
+  const availableMasks = useMemo(() => {
+    return assets.filter(a => a.type === 'mask')
+  }, [assets])
+  
+  // Format file size
+  const formatFileSize = (bytes) => {
+    if (!bytes) return 'Unknown'
+    if (bytes < 1024) return `${bytes} B`
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+    if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+    return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`
+  }
+  
+  // Format duration
+  const formatDuration = (seconds) => {
+    if (!seconds && seconds !== 0) return 'Unknown'
+    const mins = Math.floor(seconds / 60)
+    const secs = (seconds % 60).toFixed(2)
+    return mins > 0 ? `${mins}m ${parseFloat(secs).toFixed(1)}s` : `${parseFloat(secs).toFixed(2)}s`
+  }
+  
+  // Format date
+  const formatDate = (isoString) => {
+    if (!isoString) return 'Unknown'
+    const date = new Date(isoString)
+    return date.toLocaleDateString(undefined, { 
+      year: 'numeric', 
+      month: 'short', 
+      day: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit'
+    })
+  }
+  
+  // Get file extension
+  const getFileExtension = (filename) => {
+    if (!filename) return 'Unknown'
+    const parts = filename.split('.')
+    return parts.length > 1 ? `.${parts.pop().toUpperCase()}` : 'Unknown'
+  }
+  
+  // Render Asset Info Panel
+  const renderAssetInfo = () => {
+    if (!currentPreview) return null
+    
+    const asset = currentPreview
+    const isVideo = asset.type === 'video'
+    const isImage = asset.type === 'image'
+    const isAudio = asset.type === 'audio'
+    
+    // Get icon based on type
+    const TypeIcon = isVideo ? FileVideo : isImage ? FileImage : FileAudio
+    const typeColor = isVideo ? 'text-blue-400' : isImage ? 'text-green-400' : 'text-purple-400'
+    const typeBgColor = isVideo ? 'bg-blue-500' : isImage ? 'bg-green-500' : 'bg-purple-500'
+    
+    return (
+      <>
+        {/* Asset Info Header */}
+        <div className="p-3 border-b border-sf-dark-700">
+          <div className="flex items-center gap-2 mb-3">
+            <div className={`w-10 h-10 ${typeBgColor} rounded flex items-center justify-center flex-shrink-0`}>
+              <TypeIcon className="w-5 h-5 text-white" />
+            </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm font-medium text-sf-text-primary truncate" title={asset.name}>
+                {asset.name}
+              </p>
+              <p className="text-[10px] text-sf-text-muted">
+                {asset.isImported ? 'Imported' : 'AI Generated'} • {asset.type?.charAt(0).toUpperCase() + asset.type?.slice(1)}
+              </p>
+            </div>
+          </div>
+          
+          {/* Badge */}
+          <div className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-medium ${
+            asset.isImported ? 'bg-sf-dark-700 text-sf-text-secondary' : 'bg-sf-accent/20 text-sf-accent'
+          }`}>
+            {asset.isImported ? 'IMPORTED' : 'AI GENERATED'}
+          </div>
+        </div>
+
+        {/* File Details Section */}
+        <div className="p-3 border-b border-sf-dark-700">
+          <h4 className="text-[10px] text-sf-text-muted uppercase tracking-wider mb-3 flex items-center gap-1">
+            <Info className="w-3 h-3" />
+            File Details
+          </h4>
+          
+          <div className="space-y-2.5">
+            {/* File Type */}
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] text-sf-text-muted">Type</span>
+              <span className={`text-[11px] font-medium ${typeColor}`}>
+                {asset.type?.toUpperCase() || 'Unknown'}
+              </span>
+            </div>
+            
+            {/* Format/Extension */}
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] text-sf-text-muted">Format</span>
+              <span className="text-[11px] text-sf-text-primary">
+                {asset.mimeType?.split('/')[1]?.toUpperCase() || getFileExtension(asset.name)}
+              </span>
+            </div>
+            
+            {/* File Size */}
+            <div className="flex items-center justify-between">
+              <span className="text-[11px] text-sf-text-muted flex items-center gap-1">
+                <HardDrive className="w-3 h-3" />
+                Size
+              </span>
+              <span className="text-[11px] text-sf-text-primary">
+                {formatFileSize(asset.size)}
+              </span>
+            </div>
+            
+            {/* Duration (video/audio only) */}
+            {(isVideo || isAudio) && (
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-sf-text-muted flex items-center gap-1">
+                  <Clock className="w-3 h-3" />
+                  Duration
+                </span>
+                <span className="text-[11px] text-sf-text-primary">
+                  {formatDuration(asset.settings?.duration || asset.duration)}
+                </span>
+              </div>
+            )}
+            
+            {/* Resolution (video/image only) */}
+            {(isVideo || isImage) && (asset.settings?.width || asset.width) && (
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-sf-text-muted flex items-center gap-1">
+                  <Maximize2 className="w-3 h-3" />
+                  Resolution
+                </span>
+                <span className="text-[11px] text-sf-text-primary">
+                  {asset.settings?.width || asset.width}×{asset.settings?.height || asset.height}
+                </span>
+              </div>
+            )}
+            
+            {/* Frame Rate (video only) */}
+            {isVideo && (asset.settings?.fps || asset.fps) && (
+              <div className="flex items-center justify-between">
+                <span className="text-[11px] text-sf-text-muted">Frame Rate</span>
+                <span className="text-[11px] text-sf-text-primary">
+                  {asset.settings?.fps || asset.fps} fps
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+        
+        {/* Metadata Section */}
+        <div className="p-3 border-b border-sf-dark-700">
+          <h4 className="text-[10px] text-sf-text-muted uppercase tracking-wider mb-3 flex items-center gap-1">
+            <Calendar className="w-3 h-3" />
+            Metadata
+          </h4>
+          
+          <div className="space-y-2.5">
+            {/* Created Date */}
+            <div className="flex items-start justify-between">
+              <span className="text-[11px] text-sf-text-muted">Created</span>
+              <span className="text-[11px] text-sf-text-primary text-right">
+                {formatDate(asset.createdAt)}
+              </span>
+            </div>
+            
+            {/* Imported Date (if imported) */}
+            {asset.imported && (
+              <div className="flex items-start justify-between">
+                <span className="text-[11px] text-sf-text-muted">Imported</span>
+                <span className="text-[11px] text-sf-text-primary text-right">
+                  {formatDate(asset.imported)}
+                </span>
+              </div>
+            )}
+            
+            {/* File Path (if imported) */}
+            {asset.path && (
+              <div>
+                <span className="text-[11px] text-sf-text-muted block mb-1">Path</span>
+                <span className="text-[10px] text-sf-text-secondary block break-all bg-sf-dark-800 rounded px-2 py-1">
+                  {asset.path}
+                </span>
+              </div>
+            )}
+          </div>
+        </div>
+        
+        {/* AI Generation Info (if AI-generated) */}
+        {!asset.isImported && asset.prompt && (
+          <div className="p-3 border-b border-sf-dark-700">
+            <h4 className="text-[10px] text-sf-text-muted uppercase tracking-wider mb-3 flex items-center gap-1">
+              <Sparkles className="w-3 h-3" />
+              Generation Details
+            </h4>
+            
+            <div className="space-y-2.5">
+              {/* Prompt */}
+              <div>
+                <span className="text-[11px] text-sf-text-muted block mb-1">Prompt</span>
+                <p className="text-[11px] text-sf-text-primary bg-sf-dark-800 rounded px-2 py-1.5 leading-relaxed">
+                  {asset.prompt}
+                </p>
+              </div>
+              
+              {/* Negative Prompt */}
+              {asset.negativePrompt && (
+                <div>
+                  <span className="text-[11px] text-sf-text-muted block mb-1">Negative Prompt</span>
+                  <p className="text-[10px] text-sf-text-secondary bg-sf-dark-800 rounded px-2 py-1.5">
+                    {asset.negativePrompt}
+                  </p>
+                </div>
+              )}
+              
+              {/* Seed */}
+              {asset.seed !== undefined && (
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] text-sf-text-muted">Seed</span>
+                  <span className="text-[11px] text-sf-text-primary font-mono">
+                    {asset.seed}
+                  </span>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </>
+    )
+  }
+  
   // Empty state
-  const renderEmptyState = () => (
-    <div className="h-full flex flex-col items-center justify-center text-center p-4">
-      <Layers className="w-10 h-10 text-sf-dark-600 mb-3" />
-      <h3 className="text-sm font-medium text-sf-text-primary mb-1">No Selection</h3>
-      <p className="text-xs text-sf-text-muted">
-        Select a clip on the timeline to view and edit its properties
-      </p>
-    </div>
-  )
+  const renderEmptyState = () => {
+    // If an asset is being previewed, show its info instead
+    if (currentPreview && previewMode === 'asset') {
+      return renderAssetInfo()
+    }
+    
+    return (
+      <div className="h-full flex flex-col items-center justify-center text-center p-4">
+        <Layers className="w-10 h-10 text-sf-dark-600 mb-3" />
+        <h3 className="text-sm font-medium text-sf-text-primary mb-1">No Selection</h3>
+        <p className="text-xs text-sf-text-muted">
+          Select a clip on the timeline to view and edit its properties
+        </p>
+      </div>
+    )
+  }
 
   // Multi-selection info
   const renderMultiSelectInfo = () => (

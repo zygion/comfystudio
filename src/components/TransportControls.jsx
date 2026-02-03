@@ -30,7 +30,8 @@ function TransportControls() {
     volume,
     togglePlay: assetTogglePlay,
     seekTo: assetSeekTo,
-    setVolume
+    setVolume,
+    previewMode
   } = useAssetsStore()
   
   // Timeline store (for timeline playback)
@@ -58,11 +59,13 @@ function TransportControls() {
     setLoopMode
   } = useTimelineStore()
   
-  // Always use timeline mode when there are clips
-  const timelineMode = clips.length > 0
+  // Use the actual preview mode from assets store
+  // Timeline mode when previewMode is 'timeline' AND there are clips
+  // Asset mode when previewMode is 'asset' AND there's an asset selected
+  const timelineMode = previewMode === 'timeline' && clips.length > 0
   const endTime = getTimelineEndTime()
   
-  // Unified values
+  // Unified values based on current preview mode
   const isPlaying = timelineMode ? timelineIsPlaying : assetIsPlaying
   const currentTime = timelineMode ? playheadPosition : assetCurrentTime
   const duration = timelineMode ? (endTime || 60) : assetDuration

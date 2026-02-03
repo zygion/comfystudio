@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import comfyui, { modifyLTX2Workflow } from '../services/comfyui';
+import comfyui, { modifyLTX2Workflow, modifyMaskWorkflow } from '../services/comfyui';
 
 // Store the base workflow in memory after first load
 let cachedWorkflows = {};
@@ -22,14 +22,19 @@ export function useComfyUI() {
   // Track WebSocket connection state
   const [wsConnected, setWsConnected] = useState(false);
   
+  // Track WebSocket attempt count to avoid spam
+  const wsAttemptCount = useRef(0);
+  
   // Check connection on mount
   useEffect(() => {
     const checkConnection = async () => {
       const connected = await comfyui.checkConnection();
       setIsConnected(connected);
       
-      if (connected && !comfyui.isWebSocketConnected()) {
+      // Only try WebSocket a few times, then give up
+      if (connected && !comfyui.isWebSocketConnected() && wsAttemptCount.current < 3) {
         try {
+          wsAttemptCount.current++;
           await comfyui.connect();
           setWsConnected(true);
           console.log('WebSocket connected successfully');
@@ -48,8 +53,9 @@ export function useComfyUI() {
 
     checkConnection();
     
-    // Check connection periodically (less frequently if already connected)
-    const interval = setInterval(checkConnection, wsConnected ? 10000 : 5000);
+    // Check HTTP connection periodically, but don't spam WebSocket attempts
+    // Use longer interval when WebSocket has failed multiple times
+    const interval = setInterval(checkConnection, wsConnected ? 10000 : 30000);
     return () => clearInterval(interval);
   }, [wsConnected]);
 
@@ -375,6 +381,280 @@ export function useComfyUI() {
     setGenerationResult(null);
   }, []);
 
+  // ============================================
+  // MASK GENERATION
+  // ============================================
+  
+  const [maskResult, setMaskResult] = useState(null);
+  const maskPromptIdRef = useRef(null);
+  
+  /**
+   * Generate a mask from an image/video using SAM3 text prompt
+   * @param {Object} options - Generation options
+   * @param {Object} options.asset - The source asset (video or image)
+   * @param {string} options.textPrompt - Text description of what to segment
+   * @param {number} options.scoreThreshold - Detection sensitivity (default 0.04)
+   * @param {FileSystemDirectoryHandle} options.projectHandle - Project handle for saving
+   */
+  const generateMask = useCallback(async (options) => {
+    const { asset, textPrompt, scoreThreshold = 0.04, projectHandle } = options;
+    
+    if (!isConnected) {
+      setError('ComfyUI is not connected');
+      return null;
+    }
+    
+    if (!asset || !asset.url) {
+      setError('Invalid asset');
+      return null;
+    }
+
+    setIsGenerating(true);
+    setError(null);
+    setProgress({ value: 0, max: 100, percent: 0 });
+    setMaskResult(null);
+    setCurrentNode(null);
+    nodeProgressRef.current = { completed: 0, total: 0 };
+    processedPromptRef.current = null;
+
+    try {
+      // Step 1: Get the file blob from the asset URL
+      console.log('Fetching asset for upload:', asset.url);
+      console.log('Asset info:', { name: asset.name, type: asset.type, mimeType: asset.mimeType });
+      
+      const response = await fetch(asset.url);
+      if (!response.ok) {
+        throw new Error('Failed to fetch asset file');
+      }
+      const blob = await response.blob();
+      
+      // Get the original file extension from the asset name
+      let extension = '';
+      let mimeType = blob.type || asset.mimeType;
+      
+      if (asset.name) {
+        const nameParts = asset.name.split('.');
+        if (nameParts.length > 1) {
+          extension = '.' + nameParts[nameParts.length - 1].toLowerCase();
+        }
+      }
+      
+      // If no extension from name, derive from mime type
+      if (!extension) {
+        const mimeToExt = {
+          'image/jpeg': '.jpg',
+          'image/jpg': '.jpg',
+          'image/png': '.png',
+          'image/webp': '.webp',
+          'image/gif': '.gif',
+          'video/mp4': '.mp4',
+          'video/webm': '.webm',
+          'video/quicktime': '.mov',
+        };
+        extension = mimeToExt[mimeType] || '.png';
+      }
+      
+      // For VHS_LoadVideo compatibility, convert webp to png
+      // VHS_LoadVideo doesn't natively support webp in many installations
+      let file;
+      let filename;
+      
+      if (extension === '.webp') {
+        console.log('Converting webp to png for VHS_LoadVideo compatibility...');
+        // Create a canvas to convert webp to png
+        const img = new Image();
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        
+        await new Promise((resolve, reject) => {
+          img.onload = () => {
+            canvas.width = img.width;
+            canvas.height = img.height;
+            ctx.drawImage(img, 0, 0);
+            resolve();
+          };
+          img.onerror = reject;
+          img.src = URL.createObjectURL(blob);
+        });
+        
+        const pngBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'));
+        extension = '.png';
+        mimeType = 'image/png';
+        
+        filename = `storyflow_input_${Date.now()}${extension}`;
+        console.log('Converted to PNG. Creating file:', filename);
+        file = new File([pngBlob], filename, { type: mimeType });
+      } else {
+        filename = `storyflow_input_${Date.now()}${extension}`;
+        console.log('Creating file with extension:', extension, 'mimeType:', mimeType);
+        file = new File([blob], filename, { type: mimeType });
+      }
+      
+      // Step 2: Upload the file to ComfyUI
+      console.log('Uploading file to ComfyUI:', filename);
+      const uploadResult = await comfyui.uploadFile(file);
+      console.log('Upload result:', uploadResult);
+      
+      // Step 3: Load the mask workflow if not cached
+      if (!cachedWorkflows['mask-generation']) {
+        const workflowResponse = await fetch('/workflows/mask_generation_text_prompt.json');
+        if (!workflowResponse.ok) {
+          throw new Error('Failed to load mask workflow');
+        }
+        cachedWorkflows['mask-generation'] = await workflowResponse.json();
+      }
+
+      const baseWorkflow = cachedWorkflows['mask-generation'];
+      
+      // Step 4: Modify workflow with our parameters
+      const outputPrefix = `StoryFlowMask_${Date.now()}`;
+      const workflow = modifyMaskWorkflow(baseWorkflow, {
+        inputFilename: uploadResult.name,
+        textPrompt: textPrompt,
+        outputPrefix: outputPrefix,
+        scoreThreshold: scoreThreshold,
+        frameIdx: 0,
+      });
+
+      console.log('Queueing mask workflow with text prompt:', textPrompt);
+      console.log('Modified workflow node 8 (video input):', workflow['8']?.inputs);
+      console.log('Modified workflow node 12 (SAM3 segmentation):', workflow['12']?.inputs);
+
+      // Step 5: Queue the prompt
+      const promptId = await comfyui.queuePrompt(workflow);
+      console.log('Got mask prompt ID:', promptId);
+      setCurrentPromptId(promptId);
+      maskPromptIdRef.current = promptId;
+
+      // Step 6: Set up a custom polling for mask results
+      // The mask workflow outputs to node 5 (SaveImage)
+      let pollingStopped = false;
+      
+      const pollMaskCompletion = async () => {
+        if (pollingStopped) return true;
+        
+        try {
+          const history = await comfyui.getHistory(promptId);
+          const promptHistory = history[promptId];
+          
+          if (promptHistory) {
+            // Check for errors
+            if (promptHistory.status?.status_str === 'error') {
+              console.error('Mask generation failed:', promptHistory.status);
+              setError('Mask generation failed');
+              setIsGenerating(false);
+              pollingStopped = true;
+              return true; // Stop polling
+            }
+            
+            // Check for outputs
+            const outputs = promptHistory.outputs;
+            if (outputs && Object.keys(outputs).length > 0) {
+              console.log('Mask generation complete, outputs:', outputs);
+              console.log('Available output nodes:', Object.keys(outputs));
+              
+              // Find mask images - try node 5 (SaveImage) first, then check other nodes
+              let images = null;
+              
+              if (outputs['5']?.images && outputs['5'].images.length > 0) {
+                images = outputs['5'].images;
+                console.log('Found mask images in node 5:', images);
+              } else {
+                // Check all nodes for images output
+                for (const nodeId of Object.keys(outputs)) {
+                  const nodeOutput = outputs[nodeId];
+                  if (nodeOutput?.images && nodeOutput.images.length > 0) {
+                    images = nodeOutput.images;
+                    console.log(`Found mask images in node ${nodeId}:`, images);
+                    break;
+                  }
+                }
+              }
+              
+              if (images && images.length > 0) {
+                // For video masks, we get multiple frames
+                // For image masks, we get a single image
+                const firstImage = images[0];
+                const maskUrl = comfyui.getMediaUrl(
+                  firstImage.filename,
+                  firstImage.subfolder || '',
+                  firstImage.type || 'output'
+                );
+                
+                // Build mask result
+                const result = {
+                  sourceAssetId: asset.id,
+                  url: maskUrl,
+                  frameCount: images.length,
+                  width: asset.settings?.width,
+                  height: asset.settings?.height,
+                  maskFrames: images.map(img => ({
+                    filename: img.filename,
+                    url: comfyui.getMediaUrl(img.filename, img.subfolder || '', img.type || 'output'),
+                    subfolder: img.subfolder,
+                  })),
+                };
+                
+                console.log('Setting mask result:', result);
+                pollingStopped = true;
+                
+                // Set state in a controlled way
+                setProgress({ value: 100, max: 100, percent: 100 });
+                setIsGenerating(false);
+                setMaskResult(result);
+                
+                return true; // Stop polling
+              } else {
+                console.log('Outputs found but no images yet, continuing to poll...');
+              }
+            }
+          }
+          return false; // Continue polling
+        } catch (err) {
+          console.error('Error polling mask completion:', err);
+          return false; // Continue polling
+        }
+      };
+
+      // Start polling for mask results
+      const maskPollInterval = setInterval(async () => {
+        const done = await pollMaskCompletion();
+        if (done) {
+          clearInterval(maskPollInterval);
+        }
+      }, 2000);
+
+      // Initial poll
+      pollMaskCompletion();
+      
+      // Safety timeout - stop polling after 5 minutes
+      setTimeout(() => {
+        if (!pollingStopped) {
+          console.warn('Mask generation timed out after 5 minutes');
+          clearInterval(maskPollInterval);
+          pollingStopped = true;
+          setError('Mask generation timed out');
+          setIsGenerating(false);
+        }
+      }, 5 * 60 * 1000);
+
+      return promptId;
+    } catch (err) {
+      console.error('Mask generation error:', err);
+      setError(err.message);
+      setIsGenerating(false);
+      return null;
+    }
+  }, [isConnected]);
+
+  /**
+   * Clear the mask result
+   */
+  const clearMaskResult = useCallback(() => {
+    setMaskResult(null);
+    maskPromptIdRef.current = null;
+  }, []);
+
   return {
     isConnected,
     isGenerating,
@@ -388,6 +668,10 @@ export function useComfyUI() {
     clearResult,
     wsConnected,  // Expose WebSocket connection status
     currentNode,  // Expose which node is executing
+    // Mask generation
+    generateMask,
+    maskResult,
+    clearMaskResult,
   };
 }
 

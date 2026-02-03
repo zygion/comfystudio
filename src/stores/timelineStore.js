@@ -305,7 +305,11 @@ export const useTimelineStore = create(
       Math.max(max, clip.startTime + clip.duration), 0
     )
     
-    const sourceDuration = asset.settings?.duration || 5
+    // For images, use a default duration but allow extending (images have infinite source)
+    // For videos/audio, use the actual source duration
+    const isImage = asset.type === 'image'
+    const sourceDuration = isImage ? Infinity : (asset.settings?.duration || 5)
+    const defaultDuration = isImage ? 5 : sourceDuration // Images default to 5s but can be extended
     
     const newClip = {
       id: `clip-${state.clipCounter}`,
@@ -313,10 +317,10 @@ export const useTimelineStore = create(
       assetId: asset.id,
       name: asset.name,
       startTime: calculatedStartTime,
-      duration: sourceDuration, // Visible duration on timeline
-      sourceDuration: sourceDuration, // Original video duration
+      duration: defaultDuration, // Visible duration on timeline
+      sourceDuration: sourceDuration, // Original media duration (Infinity for images)
       trimStart: 0, // In-point (seconds from source start)
-      trimEnd: sourceDuration, // Out-point (seconds from source start)
+      trimEnd: defaultDuration, // Out-point (for images, this can grow)
       color: track.type === 'video' ? getVideoColor(state.clipCounter) : getAudioColor(track.id),
       type: asset.type,
       url: asset.url,
@@ -890,6 +894,474 @@ export const useTimelineStore = create(
     return state.clips.find(c => c.id === state.selectedClipIds[0]) || null
   },
 
+  // ==================== KEYFRAME MANAGEMENT ====================
+
+  /**
+   * Add or update a keyframe for a property
+   * @param {string} clipId - The clip ID
+   * @param {string} property - Property name (e.g., 'positionX', 'scaleX')
+   * @param {number} time - Time in seconds (relative to clip start)
+   * @param {number} value - Value at this keyframe
+   * @param {string} easing - Easing function (default: 'easeInOut')
+   */
+  setKeyframe: (clipId, property, time, value, easing = 'easeInOut') => {
+    get().saveToHistory()
+    
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        
+        const keyframes = clip.keyframes || {}
+        const propKeyframes = [...(keyframes[property] || [])]
+        
+        // Find existing keyframe at this time (with tolerance)
+        const existingIndex = propKeyframes.findIndex(kf => Math.abs(kf.time - time) < 0.05)
+        
+        if (existingIndex >= 0) {
+          // Update existing keyframe
+          propKeyframes[existingIndex] = { time, value, easing }
+        } else {
+          // Add new keyframe
+          propKeyframes.push({ time, value, easing })
+        }
+        
+        // Sort by time
+        propKeyframes.sort((a, b) => a.time - b.time)
+        
+        return {
+          ...clip,
+          keyframes: {
+            ...keyframes,
+            [property]: propKeyframes
+          }
+        }
+      })
+    }))
+  },
+
+  /**
+   * Remove a keyframe
+   * @param {string} clipId - The clip ID
+   * @param {string} property - Property name
+   * @param {number} time - Time of keyframe to remove
+   */
+  removeKeyframe: (clipId, property, time) => {
+    get().saveToHistory()
+    
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        
+        const keyframes = clip.keyframes || {}
+        const propKeyframes = keyframes[property] || []
+        
+        // Filter out keyframe at this time
+        const newPropKeyframes = propKeyframes.filter(kf => Math.abs(kf.time - time) > 0.05)
+        
+        // If no keyframes left for this property, remove the property entry
+        const newKeyframes = { ...keyframes }
+        if (newPropKeyframes.length === 0) {
+          delete newKeyframes[property]
+        } else {
+          newKeyframes[property] = newPropKeyframes
+        }
+        
+        return {
+          ...clip,
+          keyframes: newKeyframes
+        }
+      })
+    }))
+  },
+
+  /**
+   * Toggle keyframe at current playhead position
+   * If keyframe exists, remove it; if not, add one with current value
+   * @param {string} clipId - The clip ID
+   * @param {string} property - Property name
+   */
+  toggleKeyframe: (clipId, property) => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    if (!clip) return
+    
+    // Calculate time relative to clip start
+    const clipTime = state.playheadPosition - clip.startTime
+    if (clipTime < 0 || clipTime > clip.duration) return
+    
+    const keyframes = clip.keyframes?.[property] || []
+    const existingKeyframe = keyframes.find(kf => Math.abs(kf.time - clipTime) < 0.05)
+    
+    // Determine if we need to handle linked scale
+    const isScaleProperty = property === 'scaleX' || property === 'scaleY'
+    const isLinked = clip.transform?.scaleLinked && isScaleProperty
+    
+    if (existingKeyframe) {
+      // Remove existing keyframe
+      get().removeKeyframe(clipId, property, clipTime)
+      // If scale is linked, also remove the other scale keyframe
+      if (isLinked) {
+        const otherProperty = property === 'scaleX' ? 'scaleY' : 'scaleX'
+        get().removeKeyframe(clipId, otherProperty, clipTime)
+      }
+    } else {
+      // Add new keyframe with current transform value
+      const currentValue = clip.transform?.[property] ?? 0
+      get().setKeyframe(clipId, property, clipTime, currentValue, 'easeInOut')
+      // If scale is linked, also add keyframe for the other scale property
+      if (isLinked) {
+        const otherProperty = property === 'scaleX' ? 'scaleY' : 'scaleX'
+        const otherValue = clip.transform?.[otherProperty] ?? 0
+        get().setKeyframe(clipId, otherProperty, clipTime, otherValue, 'easeInOut')
+      }
+    }
+  },
+
+  /**
+   * Update keyframe easing
+   * @param {string} clipId - The clip ID
+   * @param {string} property - Property name
+   * @param {number} time - Keyframe time
+   * @param {string} easing - New easing value
+   */
+  updateKeyframeEasing: (clipId, property, time, easing) => {
+    get().saveToHistory()
+    
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        
+        const keyframes = clip.keyframes || {}
+        const propKeyframes = keyframes[property] || []
+        
+        const newPropKeyframes = propKeyframes.map(kf => 
+          Math.abs(kf.time - time) < 0.05 ? { ...kf, easing } : kf
+        )
+        
+        return {
+          ...clip,
+          keyframes: {
+            ...keyframes,
+            [property]: newPropKeyframes
+          }
+        }
+      })
+    }))
+  },
+
+  /**
+   * Clear all keyframes for a property
+   * @param {string} clipId - The clip ID
+   * @param {string} property - Property name
+   */
+  clearPropertyKeyframes: (clipId, property) => {
+    get().saveToHistory()
+    
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        
+        const newKeyframes = { ...clip.keyframes }
+        delete newKeyframes[property]
+        
+        return {
+          ...clip,
+          keyframes: newKeyframes
+        }
+      })
+    }))
+  },
+
+  /**
+   * Clear all keyframes for a clip
+   * @param {string} clipId - The clip ID
+   */
+  clearAllKeyframes: (clipId) => {
+    get().saveToHistory()
+    
+    set((state) => ({
+      clips: state.clips.map(clip => 
+        clip.id === clipId ? { ...clip, keyframes: {} } : clip
+      )
+    }))
+  },
+
+  /**
+   * Get keyframe at specific time for a property
+   * @param {string} clipId - The clip ID
+   * @param {string} property - Property name
+   * @param {number} time - Time to check (relative to clip start)
+   * @returns {Object|null} - Keyframe object or null
+   */
+  getKeyframeAtTime: (clipId, property, time) => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    if (!clip) return null
+    
+    const keyframes = clip.keyframes?.[property] || []
+    return keyframes.find(kf => Math.abs(kf.time - time) < 0.05) || null
+  },
+
+  /**
+   * Check if property has keyframes
+   * @param {string} clipId - The clip ID
+   * @param {string} property - Property name
+   * @returns {boolean}
+   */
+  hasKeyframes: (clipId, property) => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    return clip?.keyframes?.[property]?.length > 0
+  },
+
+  /**
+   * Navigate to next keyframe for a property
+   * @param {string} clipId - The clip ID
+   * @param {string} property - Property name (or 'all' for any property)
+   */
+  goToNextKeyframe: (clipId, property = 'all') => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    if (!clip) return
+    
+    const clipTime = state.playheadPosition - clip.startTime
+    let nextTime = Infinity
+    
+    if (property === 'all') {
+      // Find next keyframe across all properties
+      for (const propKeyframes of Object.values(clip.keyframes || {})) {
+        for (const kf of propKeyframes) {
+          if (kf.time > clipTime + 0.05 && kf.time < nextTime) {
+            nextTime = kf.time
+          }
+        }
+      }
+    } else {
+      // Find next keyframe for specific property
+      const keyframes = clip.keyframes?.[property] || []
+      for (const kf of keyframes) {
+        if (kf.time > clipTime + 0.05 && kf.time < nextTime) {
+          nextTime = kf.time
+        }
+      }
+    }
+    
+    if (nextTime !== Infinity) {
+      set({ playheadPosition: clip.startTime + nextTime })
+    }
+  },
+
+  /**
+   * Navigate to previous keyframe for a property
+   * @param {string} clipId - The clip ID
+   * @param {string} property - Property name (or 'all' for any property)
+   */
+  goToPrevKeyframe: (clipId, property = 'all') => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    if (!clip) return
+    
+    const clipTime = state.playheadPosition - clip.startTime
+    let prevTime = -Infinity
+    
+    if (property === 'all') {
+      // Find previous keyframe across all properties
+      for (const propKeyframes of Object.values(clip.keyframes || {})) {
+        for (const kf of propKeyframes) {
+          if (kf.time < clipTime - 0.05 && kf.time > prevTime) {
+            prevTime = kf.time
+          }
+        }
+      }
+    } else {
+      // Find previous keyframe for specific property
+      const keyframes = clip.keyframes?.[property] || []
+      for (const kf of keyframes) {
+        if (kf.time < clipTime - 0.05 && kf.time > prevTime) {
+          prevTime = kf.time
+        }
+      }
+    }
+    
+    if (prevTime !== -Infinity) {
+      set({ playheadPosition: clip.startTime + prevTime })
+    }
+  },
+
+  // ==================== END KEYFRAME MANAGEMENT ====================
+
+  // ==================== EFFECTS MANAGEMENT ====================
+
+  /**
+   * Add an effect to a clip
+   * @param {string} clipId - The clip ID
+   * @param {object} effect - Effect configuration { type, ...params }
+   * @returns {object} The created effect
+   */
+  addEffect: (clipId, effect) => {
+    get().saveToHistory()
+    
+    const effectId = `effect-${Date.now()}`
+    const newEffect = {
+      id: effectId,
+      enabled: true,
+      ...effect,
+    }
+    
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        
+        const effects = clip.effects || []
+        return {
+          ...clip,
+          effects: [...effects, newEffect]
+        }
+      })
+    }))
+    
+    return newEffect
+  },
+
+  /**
+   * Remove an effect from a clip
+   * @param {string} clipId - The clip ID
+   * @param {string} effectId - The effect ID to remove
+   */
+  removeEffect: (clipId, effectId) => {
+    get().saveToHistory()
+    
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        
+        const effects = clip.effects || []
+        return {
+          ...clip,
+          effects: effects.filter(e => e.id !== effectId)
+        }
+      })
+    }))
+  },
+
+  /**
+   * Update an effect's properties
+   * @param {string} clipId - The clip ID
+   * @param {string} effectId - The effect ID
+   * @param {object} updates - Properties to update
+   * @param {boolean} saveHistory - Whether to save to history (default: false for realtime)
+   */
+  updateEffect: (clipId, effectId, updates, saveHistory = false) => {
+    if (saveHistory) {
+      get().saveToHistory()
+    }
+    
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        
+        const effects = clip.effects || []
+        return {
+          ...clip,
+          effects: effects.map(e => 
+            e.id === effectId ? { ...e, ...updates } : e
+          )
+        }
+      })
+    }))
+  },
+
+  /**
+   * Toggle an effect's enabled state
+   * @param {string} clipId - The clip ID
+   * @param {string} effectId - The effect ID
+   */
+  toggleEffect: (clipId, effectId) => {
+    get().saveToHistory()
+    
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        
+        const effects = clip.effects || []
+        return {
+          ...clip,
+          effects: effects.map(e => 
+            e.id === effectId ? { ...e, enabled: !e.enabled } : e
+          )
+        }
+      })
+    }))
+  },
+
+  /**
+   * Reorder effects (move effect up or down in the stack)
+   * @param {string} clipId - The clip ID
+   * @param {string} effectId - The effect ID to move
+   * @param {number} direction - -1 for up, 1 for down
+   */
+  reorderEffect: (clipId, effectId, direction) => {
+    get().saveToHistory()
+    
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        
+        const effects = [...(clip.effects || [])]
+        const index = effects.findIndex(e => e.id === effectId)
+        
+        if (index === -1) return clip
+        
+        const newIndex = index + direction
+        if (newIndex < 0 || newIndex >= effects.length) return clip
+        
+        // Swap
+        [effects[index], effects[newIndex]] = [effects[newIndex], effects[index]]
+        
+        return { ...clip, effects }
+      })
+    }))
+  },
+
+  /**
+   * Get all effects for a clip
+   * @param {string} clipId - The clip ID
+   * @returns {Array} Array of effects
+   */
+  getClipEffects: (clipId) => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    return clip?.effects || []
+  },
+
+  /**
+   * Get enabled effects for a clip (for rendering)
+   * @param {string} clipId - The clip ID
+   * @returns {Array} Array of enabled effects
+   */
+  getEnabledEffects: (clipId) => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    return (clip?.effects || []).filter(e => e.enabled)
+  },
+
+  /**
+   * Add a mask effect to a clip
+   * @param {string} clipId - The clip ID
+   * @param {string} maskAssetId - The mask asset ID
+   * @returns {object} The created mask effect
+   */
+  addMaskEffect: (clipId, maskAssetId) => {
+    return get().addEffect(clipId, {
+      type: 'mask',
+      maskAssetId,
+      invertMask: false,
+      feather: 0,
+    })
+  },
+
+  // ==================== END EFFECTS MANAGEMENT ====================
+
   /**
    * Trim a clip from the left (adjust in-point)
    */
@@ -913,13 +1385,17 @@ export const useTimelineStore = create(
 
   /**
    * Trim a clip from the right (adjust out-point)
+   * Images can be extended indefinitely (sourceDuration = Infinity)
    */
   trimClipEnd: (clipId, deltaTime) => {
     set((state) => ({
       clips: state.clips.map(clip => {
         if (clip.id !== clipId) return clip
         
-        const newTrimEnd = Math.max(clip.trimStart + 0.5, Math.min(clip.sourceDuration, clip.trimEnd + deltaTime))
+        // For images (Infinity source), allow extending without limit
+        // For video/audio, cap at source duration
+        const maxDuration = clip.sourceDuration === Infinity ? Infinity : clip.sourceDuration
+        const newTrimEnd = Math.max(clip.trimStart + 0.5, Math.min(maxDuration, clip.trimEnd + deltaTime))
         const newDuration = newTrimEnd - clip.trimStart
         
         return {

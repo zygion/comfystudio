@@ -1,6 +1,95 @@
-import { useEffect, useRef, useCallback, useState, memo } from 'react'
+import { useEffect, useRef, useCallback, useState, memo, useMemo } from 'react'
 import useTimelineStore from '../stores/timelineStore'
+import useAssetsStore from '../stores/assetsStore'
 import videoCache from '../services/videoCache'
+import { getAnimatedTransform } from '../utils/keyframes'
+
+/**
+ * Hook to get the current valid URL for a clip
+ * Falls back to clip.url if asset not found (for backwards compatibility)
+ */
+function useClipUrl(clip) {
+  const getAssetUrl = useAssetsStore(state => state.getAssetUrl)
+  
+  return useMemo(() => {
+    if (!clip) return null
+    // For text clips, there's no URL
+    if (clip.type === 'text') return null
+    // Try to get URL from assets store (will have regenerated URL after refresh)
+    if (clip.assetId) {
+      const assetUrl = getAssetUrl(clip.assetId)
+      if (assetUrl) return assetUrl
+    }
+    // Fallback to clip's stored URL (may be stale after refresh)
+    return clip.url
+  }, [clip, clip?.assetId, getAssetUrl])
+}
+
+/**
+ * Hook to get mask effect styles for a clip
+ * Returns CSS mask properties if the clip has enabled mask effects
+ */
+function useMaskEffectStyle(clip, playheadPosition) {
+  const getAssetById = useAssetsStore(state => state.getAssetById)
+  
+  return useMemo(() => {
+    if (!clip || !clip.effects) return {}
+    
+    // Find enabled mask effects
+    const maskEffects = clip.effects.filter(e => e.type === 'mask' && e.enabled)
+    if (maskEffects.length === 0) return {}
+    
+    // Use the first mask effect (for now, we only support one mask per clip)
+    const maskEffect = maskEffects[0]
+    const maskAsset = getAssetById(maskEffect.maskAssetId)
+    
+    if (!maskAsset) return {}
+    
+    // For video masks (PNG sequences), we need to get the correct frame
+    let maskUrl = maskAsset.url
+    
+    if (maskAsset.maskFrames && maskAsset.maskFrames.length > 1) {
+      // Calculate which frame to use based on clip time
+      const clipTime = playheadPosition - clip.startTime
+      const clipProgress = Math.max(0, Math.min(1, clipTime / clip.duration))
+      const frameIndex = Math.min(
+        Math.floor(clipProgress * maskAsset.frameCount),
+        maskAsset.frameCount - 1
+      )
+      
+      // Get the URL for this specific frame
+      if (maskAsset.maskFrames[frameIndex]?.url) {
+        maskUrl = maskAsset.maskFrames[frameIndex].url
+      }
+    }
+    
+    if (!maskUrl) return {}
+    
+    // Build CSS mask styles
+    const maskStyles = {
+      WebkitMaskImage: `url(${maskUrl})`,
+      maskImage: `url(${maskUrl})`,
+      WebkitMaskSize: 'contain',
+      maskSize: 'contain',
+      WebkitMaskPosition: 'center',
+      maskPosition: 'center',
+      WebkitMaskRepeat: 'no-repeat',
+      maskRepeat: 'no-repeat',
+      // Use luminance mode - white = visible, black = transparent
+      WebkitMaskMode: 'luminance',
+      maskMode: 'luminance',
+    }
+    
+    // Handle mask inversion
+    if (maskEffect.invertMask) {
+      // Invert by using a filter (note: limited browser support for mask-composite)
+      // Alternative: we could invert the actual mask image server-side
+      maskStyles.filter = 'invert(1)'
+    }
+    
+    return maskStyles
+  }, [clip, clip?.effects, playheadPosition, getAssetById])
+}
 
 /**
  * VideoLayerRenderer - Renders video layers with preloading for seamless playback
@@ -32,34 +121,52 @@ const VideoLayer = memo(function VideoLayer({
   const [isReady, setIsReady] = useState(false)
   const lastSyncTime = useRef(0)
   
+  // Get the current valid URL (may be regenerated after page refresh)
+  const clipUrl = useClipUrl(clip)
+  
+  // Get mask effect styles if any
+  const maskStyles = useMaskEffectStyle(clip, playheadPosition)
+  
+  // Calculate clip-relative time for keyframe evaluation
+  const clipTime = playheadPosition - (clip?.startTime || 0)
+  
+  // Get animated transform (with keyframes applied)
+  const animatedTransform = useMemo(() => {
+    if (!clip) return null
+    // Use keyframe-interpolated values if keyframes exist, otherwise use base transform
+    return getAnimatedTransform(clip, clipTime)
+  }, [clip, clipTime])
+  
   // Get cached video element on mount
   useEffect(() => {
-    if (!clip?.url) return
+    if (!clipUrl) return
     
-    // Get or create cached video for this clip
-    const cachedVideo = videoCache.getVideoElement(clip)
+    // Get or create cached video for this clip (pass URL separately)
+    const clipWithUrl = { ...clip, url: clipUrl }
+    const cachedVideo = videoCache.getVideoElement(clipWithUrl)
     if (cachedVideo && videoRef.current) {
       // Copy source from cached video if different
-      if (videoRef.current.src !== clip.url) {
-        videoRef.current.src = clip.url
+      if (videoRef.current.src !== clipUrl) {
+        videoRef.current.src = clipUrl
       }
     }
-  }, [clip?.url, clip?.id])
+  }, [clipUrl, clip?.id])
 
   // Sync video playback with timeline
   useEffect(() => {
     if (!videoRef.current || !clip) return
     
     const video = videoRef.current
-    const clipTime = (clip.trimStart || 0) + (playheadPosition - clip.startTime)
+    const sourceTime = (clip.trimStart || 0) + clipTime
     
-    // Clamp clipTime to valid range
-    const clampedTime = Math.max(0, Math.min(clipTime, clip.sourceDuration || clip.duration))
+    // Clamp sourceTime to valid range
+    const clampedTime = Math.max(0, Math.min(sourceTime, clip.sourceDuration || clip.duration))
     
     // Only seek if significantly different to avoid stuttering
-    // Use smaller threshold for smoother scrubbing
+    // Threshold must be less than 1 frame (1/30 = 0.033s) to support frame-by-frame stepping
+    // Using 0.02s ensures even 60fps frame steps are captured
     const timeDiff = Math.abs(video.currentTime - clampedTime)
-    if (timeDiff > 0.08) {
+    if (timeDiff > 0.02) {
       video.currentTime = clampedTime
       lastSyncTime.current = playheadPosition
     }
@@ -74,7 +181,7 @@ const VideoLayer = memo(function VideoLayer({
         video.pause()
       }
     }
-  }, [clip, playheadPosition, isPlaying])
+  }, [clip, clipTime, playheadPosition, isPlaying])
 
   // Handle video ready state
   const handleCanPlay = useCallback(() => {
@@ -87,8 +194,8 @@ const VideoLayer = memo(function VideoLayer({
 
   if (!clip) return null
 
-  const transform = getClipTransform(clip)
-  const transformStyle = buildVideoTransform(transform)
+  // Use animated transform instead of base transform
+  const transformStyle = buildVideoTransform(animatedTransform)
   
   // First layer (bottom) can have audio in single-layer mode
   const shouldMute = layerIndex > 0 || totalLayers > 1
@@ -104,8 +211,10 @@ const VideoLayer = memo(function VideoLayer({
         top: 0,
         left: 0,
         zIndex: layerIndex + 1,
-        // Apply clip transforms
+        // Apply animated clip transforms
         ...transformStyle,
+        // Apply mask effect styles
+        ...maskStyles,
       }}
       muted={shouldMute}
       loop={false}
@@ -129,17 +238,31 @@ const ImageLayer = memo(function ImageLayer({
   track, 
   layerIndex, 
   totalLayers,
+  playheadPosition,
   buildVideoTransform,
   getClipTransform,
 }) {
-  if (!clip?.url) return null
+  // Get the current valid URL (may be regenerated after page refresh)
+  const clipUrl = useClipUrl(clip)
+  
+  // Get mask effect styles if any
+  const maskStyles = useMaskEffectStyle(clip, playheadPosition)
+  
+  if (!clipUrl) return null
 
-  const transform = getClipTransform(clip)
-  const transformStyle = buildVideoTransform(transform)
+  // Calculate clip-relative time for keyframe evaluation
+  const clipTime = playheadPosition - (clip?.startTime || 0)
+  
+  // Get animated transform (with keyframes applied)
+  const animatedTransform = useMemo(() => {
+    return getAnimatedTransform(clip, clipTime)
+  }, [clip, clipTime])
+  
+  const transformStyle = buildVideoTransform(animatedTransform)
 
   return (
     <img
-      src={clip.url}
+      src={clipUrl}
       alt={clip.name || 'Image'}
       className="bg-transparent w-full h-full"
       style={{
@@ -149,8 +272,10 @@ const ImageLayer = memo(function ImageLayer({
         top: 0,
         left: 0,
         zIndex: layerIndex + 1,
-        // Apply clip transforms
+        // Apply animated clip transforms
         ...transformStyle,
+        // Apply mask effect styles
+        ...maskStyles,
       }}
       onContextMenu={(e) => e.preventDefault()}
       draggable={false}
@@ -166,13 +291,21 @@ const TextLayer = memo(function TextLayer({
   track,
   layerIndex,
   totalLayers,
+  playheadPosition,
   buildVideoTransform,
   getClipTransform,
 }) {
   if (!clip || clip.type !== 'text') return null
   
-  const transform = getClipTransform(clip)
-  const transformStyle = buildVideoTransform(transform)
+  // Calculate clip-relative time for keyframe evaluation
+  const clipTime = playheadPosition - (clip?.startTime || 0)
+  
+  // Get animated transform (with keyframes applied)
+  const animatedTransform = useMemo(() => {
+    return getAnimatedTransform(clip, clipTime)
+  }, [clip, clipTime])
+  
+  const transformStyle = buildVideoTransform(animatedTransform)
   const textProps = clip.textProperties || {}
   
   // Build text styles from textProperties
@@ -470,6 +603,7 @@ function VideoLayerRenderer({
             track={track}
             layerIndex={index}
             totalLayers={mediaClips.length}
+            playheadPosition={playheadPosition}
             buildVideoTransform={buildVideoTransform}
             getClipTransform={getClipTransform}
           />
@@ -496,6 +630,7 @@ function VideoLayerRenderer({
           track={track}
           layerIndex={index}
           totalLayers={textClips.length}
+          playheadPosition={playheadPosition}
           buildVideoTransform={buildVideoTransform}
           getClipTransform={getClipTransform}
         />
