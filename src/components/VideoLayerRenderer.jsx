@@ -1,38 +1,187 @@
-import { useEffect, useRef, useCallback, useState, memo, useMemo } from 'react'
+import { useEffect, useRef, useCallback, useState, useMemo, useLayoutEffect, memo } from 'react'
 import useTimelineStore from '../stores/timelineStore'
 import useAssetsStore from '../stores/assetsStore'
+import useProjectStore from '../stores/projectStore'
 import videoCache from '../services/videoCache'
 import { getAnimatedTransform } from '../utils/keyframes'
+import { loadRenderCache } from '../services/fileSystem'
+import { getSpriteFramePosition } from '../services/thumbnailSprites'
+
+/**
+ * Get scaled sprite style that fills the container while showing the correct frame
+ * Returns style for an inner div that will be absolutely positioned and scaled
+ */
+function getScaledSpriteStyle(spriteData, time) {
+  if (!spriteData || !spriteData.frames || !spriteData.url) return null
+  
+  const framePos = getSpriteFramePosition(spriteData, time)
+  if (!framePos) return null
+  
+  // Just return the original sprite style - we'll handle scaling differently
+  return {
+    spriteUrl: spriteData.url,
+    frameX: framePos.x,
+    frameY: framePos.y,
+    frameWidth: framePos.width,
+    frameHeight: framePos.height,
+    spriteWidth: spriteData.width,
+    spriteHeight: spriteData.height,
+  }
+}
+
+/**
+ * Track which clips are currently being loaded from disk to prevent duplicate loads
+ */
+const loadingCacheFromDisk = new Set()
+
+/**
+ * Cache of loaded blob URLs from disk (clipId -> blobUrl)
+ * This persists across re-renders until the blob is explicitly revoked
+ */
+const diskCacheUrls = new Map()
+
+/**
+ * Helper to check if a blob URL is still valid
+ * Blob URLs become invalid after page refresh
+ */
+function isBlobUrlValid(url) {
+  if (!url || !url.startsWith('blob:')) return false
+  // We can't truly validate a blob URL without fetching it,
+  // but we can check if it's in our known-good map
+  return diskCacheUrls.has(url) || false
+}
+
+/**
+ * Hook to load render cache from disk when needed
+ * This handles the case where a clip has cachePath but stale/invalid cacheUrl
+ */
+function useDiskCacheLoader(clip) {
+  const currentProjectHandle = useProjectStore(state => state.currentProjectHandle)
+  const setCacheUrl = useTimelineStore(state => state.setCacheUrl)
+  const [loadedUrl, setLoadedUrl] = useState(null)
+  
+  useEffect(() => {
+    // Only proceed if:
+    // 1. We have a clip with a cachePath (saved to disk)
+    // 2. The clip is marked as cached but cacheUrl is missing or might be stale
+    // 3. We have a project handle to read from disk
+    // 4. We're not already loading this clip
+    if (!clip || !clip.cachePath || !currentProjectHandle) return
+    if (loadingCacheFromDisk.has(clip.id)) return
+    
+    // Check if we already have a valid loaded URL for this clip
+    const existingUrl = diskCacheUrls.get(clip.id)
+    if (existingUrl) {
+      setLoadedUrl(existingUrl)
+      return
+    }
+    
+    // Check if the current cacheUrl looks valid (not a stale blob URL)
+    // After page refresh, blob URLs become invalid
+    if (clip.cacheUrl && !clip.cacheUrl.startsWith('blob:')) {
+      // Non-blob URL, probably fine
+      return
+    }
+    
+    // If cacheStatus is 'cached' but we don't have a verified URL, we need to reload
+    // This happens after page refresh when blob URLs become invalid
+    const needsReload = clip.cachePath && (
+      !clip.cacheUrl || 
+      (clip.cacheStatus === 'cached' && clip.cacheUrl?.startsWith('blob:') && !diskCacheUrls.has(clip.id))
+    )
+    
+    if (!needsReload) return
+    
+    // Mark as loading to prevent duplicate loads
+    loadingCacheFromDisk.add(clip.id)
+    
+    // Load from disk
+    const loadFromDisk = async () => {
+      try {
+        console.log(`Loading render cache from disk for clip ${clip.id}: ${clip.cachePath}`)
+        const result = await loadRenderCache(currentProjectHandle, clip.cachePath)
+        
+        if (result && result.url) {
+          // Store in our local map for future reference
+          diskCacheUrls.set(clip.id, result.url)
+          
+          // Update the clip's cacheUrl in the store
+          setCacheUrl(clip.id, result.url, clip.cachePath)
+          setLoadedUrl(result.url)
+          
+          console.log(`Successfully loaded render cache for clip ${clip.id}`)
+        } else {
+          console.warn(`Failed to load render cache for clip ${clip.id}: no URL returned`)
+        }
+      } catch (err) {
+        console.error(`Error loading render cache for clip ${clip.id}:`, err)
+      } finally {
+        loadingCacheFromDisk.delete(clip.id)
+      }
+    }
+    
+    loadFromDisk()
+  }, [clip?.id, clip?.cachePath, clip?.cacheUrl, clip?.cacheStatus, currentProjectHandle, setCacheUrl])
+  
+  return loadedUrl
+}
 
 /**
  * Hook to get the current valid URL for a clip
  * Falls back to clip.url if asset not found (for backwards compatibility)
+ * Returns cached render URL if available and valid
+ * Now also handles loading stale cache URLs from disk
  */
 function useClipUrl(clip) {
   const getAssetUrl = useAssetsStore(state => state.getAssetUrl)
   
+  // This hook will trigger loading from disk if needed and return the loaded URL
+  const diskLoadedUrl = useDiskCacheLoader(clip)
+  
   return useMemo(() => {
-    if (!clip) return null
+    if (!clip) return { url: null, isCached: false }
     // For text clips, there's no URL
-    if (clip.type === 'text') return null
+    if (clip.type === 'text') return { url: null, isCached: false }
+    
+    // Check if we have a valid cached render
+    // Priority: diskLoadedUrl (freshly loaded) > clip.cacheUrl (from store)
+    if (clip.cacheStatus === 'cached') {
+      // Use disk-loaded URL if available (this is guaranteed fresh)
+      if (diskLoadedUrl) {
+        return { url: diskLoadedUrl, isCached: true }
+      }
+      // Use clip.cacheUrl if it's in our verified map
+      if (clip.cacheUrl && diskCacheUrls.has(clip.id)) {
+        return { url: clip.cacheUrl, isCached: true }
+      }
+      // Use clip.cacheUrl if it exists (might be from current session)
+      if (clip.cacheUrl) {
+        return { url: clip.cacheUrl, isCached: true }
+      }
+    }
+    
     // Try to get URL from assets store (will have regenerated URL after refresh)
     if (clip.assetId) {
       const assetUrl = getAssetUrl(clip.assetId)
-      if (assetUrl) return assetUrl
+      if (assetUrl) return { url: assetUrl, isCached: false }
     }
     // Fallback to clip's stored URL (may be stale after refresh)
-    return clip.url
-  }, [clip, clip?.assetId, getAssetUrl])
+    return { url: clip.url, isCached: false }
+  }, [clip, clip?.assetId, clip?.cacheStatus, clip?.cacheUrl, clip?.id, diskLoadedUrl, getAssetUrl])
 }
 
 /**
  * Hook to get mask effect styles for a clip
  * Returns CSS mask properties if the clip has enabled mask effects
+ * Returns empty object if clip is using cached render (mask already baked in)
  */
-function useMaskEffectStyle(clip, playheadPosition) {
+function useMaskEffectStyle(clip, playheadPosition, isCachedRender = false) {
   const getAssetById = useAssetsStore(state => state.getAssetById)
   
   return useMemo(() => {
+    // Skip CSS masks if using cached render (mask is already composited)
+    if (isCachedRender) return {}
+    
     if (!clip || !clip.effects) return {}
     
     // Find enabled mask effects
@@ -88,7 +237,7 @@ function useMaskEffectStyle(clip, playheadPosition) {
     }
     
     return maskStyles
-  }, [clip, clip?.effects, playheadPosition, getAssetById])
+  }, [clip, clip?.effects, playheadPosition, isCachedRender, getAssetById])
 }
 
 /**
@@ -116,19 +265,35 @@ const VideoLayer = memo(function VideoLayer({
   isPlaying,
   buildVideoTransform,
   getClipTransform,
+  isInTransition = false, // Whether this clip is part of a transition
 }) {
   const videoRef = useRef(null)
   const [isReady, setIsReady] = useState(false)
+  const [showSprite, setShowSprite] = useState(false)
+  const [spriteContainerSize, setSpriteContainerSize] = useState({ width: 0, height: 0 })
   const lastSyncTime = useRef(0)
+  const lastSeekTime = useRef(0)
+  const seekDebounceRef = useRef(null)
+  const isScrubbing = useRef(false)
+  const lastPlayheadRef = useRef(playheadPosition)
   
-  // Get the current valid URL (may be regenerated after page refresh)
-  const clipUrl = useClipUrl(clip)
+  // Get the current valid URL (may be cached render or original)
+  const { url: clipUrl, isCached: isCachedRender } = useClipUrl(clip)
   
-  // Get mask effect styles if any
-  const maskStyles = useMaskEffectStyle(clip, playheadPosition)
+  // Get sprite data for this clip's asset
+  const getAssetSprite = useAssetsStore(state => state.getAssetSprite)
+  const spriteData = clip?.assetId ? getAssetSprite(clip.assetId) : null
+  
+  // Get mask effect styles for video (skip if using cached render)
+  const maskStyles = useMaskEffectStyle(clip, playheadPosition, isCachedRender)
+  // Always compute mask styles for sprite overlay (sprites are from source)
+  const spriteMaskStyles = useMaskEffectStyle(clip, playheadPosition, false)
   
   // Calculate clip-relative time for keyframe evaluation
   const clipTime = playheadPosition - (clip?.startTime || 0)
+  
+  // Calculate source time for sprite frame lookup
+  const sourceTime = (clip?.trimStart || 0) + clipTime
   
   // Get animated transform (with keyframes applied)
   const animatedTransform = useMemo(() => {
@@ -137,20 +302,138 @@ const VideoLayer = memo(function VideoLayer({
     return getAnimatedTransform(clip, clipTime)
   }, [clip, clipTime])
   
-  // Get cached video element on mount
+  // Get sprite frame info for current time (memoized to prevent recalculations)
+  const spriteInfo = useMemo(() => {
+    if (!spriteData || !spriteData.url) return null
+    return getScaledSpriteStyle(spriteData, sourceTime)
+  }, [spriteData, sourceTime])
+
+  const updateSpriteContainerSize = useCallback(() => {
+    const el = videoRef.current
+    if (!el) return
+    const rect = el.getBoundingClientRect()
+    if (!rect.width || !rect.height) return
+    const width = Math.round(rect.width)
+    const height = Math.round(rect.height)
+    setSpriteContainerSize(prev => (
+      prev.width === width && prev.height === height ? prev : { width, height }
+    ))
+  }, [])
+
+  useLayoutEffect(() => {
+    let ro
+    let rafId
+
+    const tryAttach = () => {
+      const el = videoRef.current
+      if (!el) {
+        rafId = requestAnimationFrame(tryAttach)
+        return
+      }
+      updateSpriteContainerSize()
+      if (typeof ResizeObserver !== 'undefined') {
+        ro = new ResizeObserver(updateSpriteContainerSize)
+        ro.observe(el)
+      } else {
+        window.addEventListener('resize', updateSpriteContainerSize)
+      }
+    }
+
+    tryAttach()
+
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId)
+      if (ro) ro.disconnect()
+      window.removeEventListener('resize', updateSpriteContainerSize)
+    }
+  }, [updateSpriteContainerSize])
+
+  const spriteOverlayStyle = useMemo(() => {
+    if (!spriteInfo || !spriteContainerSize.width || !spriteContainerSize.height) return null
+    const scale = Math.min(
+      spriteContainerSize.width / spriteInfo.frameWidth,
+      spriteContainerSize.height / spriteInfo.frameHeight
+    )
+    const scaledSpriteWidth = spriteInfo.spriteWidth * scale
+    const scaledSpriteHeight = spriteInfo.spriteHeight * scale
+    const offsetX = (spriteContainerSize.width - spriteInfo.frameWidth * scale) / 2 - (spriteInfo.frameX * scale)
+    const offsetY = (spriteContainerSize.height - spriteInfo.frameHeight * scale) / 2 - (spriteInfo.frameY * scale)
+
+    return {
+      backgroundImage: `url(${spriteInfo.spriteUrl})`,
+      backgroundRepeat: 'no-repeat',
+      backgroundSize: `${scaledSpriteWidth}px ${scaledSpriteHeight}px`,
+      backgroundPosition: `${offsetX}px ${offsetY}px`,
+    }
+  }, [spriteInfo, spriteContainerSize])
+  
+  // Get cached video element on mount and pre-seek for transitions
   useEffect(() => {
     if (!clipUrl) return
     
     // Get or create cached video for this clip (pass URL separately)
+    // Note: For cached renders, we use the blob URL directly
     const clipWithUrl = { ...clip, url: clipUrl }
     const cachedVideo = videoCache.getVideoElement(clipWithUrl)
     if (cachedVideo && videoRef.current) {
       // Copy source from cached video if different
       if (videoRef.current.src !== clipUrl) {
         videoRef.current.src = clipUrl
+        
+        // For transition clips, pre-seek to the correct position immediately
+        if (isInTransition && clip) {
+          const sourceTime = (clip.trimStart || 0) + clipTime
+          const maxTime = clip.sourceDuration || clip.duration
+          const clampedTime = Math.max(0, Math.min(sourceTime, maxTime - 0.01))
+          videoRef.current.currentTime = clampedTime
+        }
       }
     }
-  }, [clipUrl, clip?.id])
+  }, [clipUrl, clip?.id, isCachedRender, isInTransition, clip, clipTime])
+
+  // Detect scrubbing (rapid playhead changes while paused)
+  useEffect(() => {
+    if (isPlaying) {
+      isScrubbing.current = false
+      if (showSprite) setShowSprite(false)
+      return
+    }
+    
+    const playheadDelta = Math.abs(playheadPosition - lastPlayheadRef.current)
+    lastPlayheadRef.current = playheadPosition
+    
+    // If playhead moved significantly while paused, we're scrubbing
+    if (playheadDelta > 0.01) {
+      isScrubbing.current = true
+      // Show sprite during scrubbing if available (only set if not already showing)
+      if (spriteData?.url && !showSprite) {
+        setShowSprite(true)
+      }
+      
+      // Reset scrubbing flag after user stops for 150ms
+      if (seekDebounceRef.current) {
+        clearTimeout(seekDebounceRef.current)
+      }
+      seekDebounceRef.current = setTimeout(() => {
+        isScrubbing.current = false
+        setShowSprite(false)
+        // Force a final precise seek when scrubbing stops
+        if (videoRef.current && clip) {
+          const currentPlayhead = useTimelineStore.getState().playheadPosition
+          const sourceTime = (clip.trimStart || 0) + (currentPlayhead - clip.startTime)
+          const maxTime = clip.sourceDuration || clip.duration
+          const clampedTime = Math.max(0, Math.min(sourceTime, maxTime))
+          videoRef.current.currentTime = clampedTime
+        }
+      }, 150)
+    }
+    
+    return () => {
+      if (seekDebounceRef.current) {
+        clearTimeout(seekDebounceRef.current)
+      }
+    }
+  }, [playheadPosition, isPlaying]) // Removed spriteData and clip from deps to prevent loops
 
   // Sync video playback with timeline
   useEffect(() => {
@@ -160,28 +443,60 @@ const VideoLayer = memo(function VideoLayer({
     const sourceTime = (clip.trimStart || 0) + clipTime
     
     // Clamp sourceTime to valid range
-    const clampedTime = Math.max(0, Math.min(sourceTime, clip.sourceDuration || clip.duration))
+    const maxTime = clip.sourceDuration || clip.duration
+    const clampedTime = Math.max(0, Math.min(sourceTime, maxTime - 0.01)) // Stay slightly before end
     
-    // Only seek if significantly different to avoid stuttering
-    // Threshold must be less than 1 frame (1/30 = 0.033s) to support frame-by-frame stepping
-    // Using 0.02s ensures even 60fps frame steps are captured
+    // Calculate time difference
     const timeDiff = Math.abs(video.currentTime - clampedTime)
-    if (timeDiff > 0.02) {
-      video.currentTime = clampedTime
-      lastSyncTime.current = playheadPosition
-    }
     
-    // Sync play/pause state
+    // Use different sync strategies for playing vs paused vs scrubbing
     if (isPlaying) {
+      // When playing: Let the video play naturally, only correct large drifts
+      // During transitions, use a larger threshold to avoid fighting between two videos
+      const driftThreshold = isInTransition ? 0.25 : 0.15
+      
+      if (timeDiff > driftThreshold) {
+        video.currentTime = clampedTime
+        lastSyncTime.current = playheadPosition
+      }
+      
+      // Start playing if paused
       if (video.paused && video.readyState >= 2) {
         video.play().catch(() => {})
       }
+    } else if (isScrubbing.current) {
+      // When scrubbing with sprite: skip video seeking entirely (sprite handles display)
+      // When scrubbing without sprite: use throttled seeking
+      if (!spriteData?.url) {
+        const now = performance.now()
+        if (now - lastSeekTime.current > 50) { // 50ms = 20 fps during scrub
+          // Use fastSeek if available (seeks to nearest keyframe - much faster)
+          if (video.fastSeek && typeof video.fastSeek === 'function') {
+            video.fastSeek(clampedTime)
+          } else {
+            video.currentTime = clampedTime
+          }
+          lastSeekTime.current = now
+        }
+      }
+      
+      // Ensure video is paused
+      if (!video.paused) {
+        video.pause()
+      }
     } else {
+      // When paused (not scrubbing): Use tight threshold for precise positioning
+      if (timeDiff > 0.02) {
+        video.currentTime = clampedTime
+        lastSyncTime.current = playheadPosition
+      }
+      
+      // Ensure video is paused
       if (!video.paused) {
         video.pause()
       }
     }
-  }, [clip, clipTime, playheadPosition, isPlaying])
+  }, [clip, clipTime, playheadPosition, isPlaying, spriteData, isInTransition])
 
   // Handle video ready state
   const handleCanPlay = useCallback(() => {
@@ -201,32 +516,57 @@ const VideoLayer = memo(function VideoLayer({
   const shouldMute = layerIndex > 0 || totalLayers > 1
 
   return (
-    <video
-      ref={videoRef}
-      className="bg-transparent w-full h-full"
-      style={{
-        objectFit: 'contain', // Maintain aspect ratio, letterbox if needed (no stretching/squeezing)
-        display: 'block',
-        position: layerIndex === 0 ? 'relative' : 'absolute',
-        top: 0,
-        left: 0,
-        zIndex: layerIndex + 1,
-        // Apply animated clip transforms
-        ...transformStyle,
-        // Apply mask effect styles
-        ...maskStyles,
-      }}
-      muted={shouldMute}
-      loop={false}
-      playsInline
-      preload="auto"
-      onCanPlay={handleCanPlay}
-      onCanPlayThrough={handleCanPlay}
-      onWaiting={handleWaiting}
-      onContextMenu={(e) => e.preventDefault()}
-      controlsList="nodownload nofullscreen noremoteplayback"
-      disablePictureInPicture
-    />
+    <>
+      {/* Video element (hidden during sprite scrubbing) */}
+      <video
+        ref={videoRef}
+        className="bg-transparent w-full h-full"
+        style={{
+          objectFit: 'contain', // Maintain aspect ratio, letterbox if needed (no stretching/squeezing)
+          display: 'block',
+          position: layerIndex === 0 ? 'relative' : 'absolute',
+          top: 0,
+          left: 0,
+          zIndex: layerIndex + 1,
+          // Hide video when showing sprite
+          opacity: showSprite && spriteInfo ? 0 : 1,
+          // Apply animated clip transforms
+          ...transformStyle,
+          // Apply mask effect styles
+          ...maskStyles,
+        }}
+        muted={shouldMute}
+        loop={false}
+        playsInline
+        preload="auto"
+        onCanPlay={handleCanPlay}
+        onCanPlayThrough={handleCanPlay}
+        onWaiting={handleWaiting}
+        onContextMenu={(e) => e.preventDefault()}
+        controlsList="nodownload nofullscreen noremoteplayback"
+        disablePictureInPicture
+      />
+      
+      {/* Sprite overlay (shown during fast scrubbing) */}
+      {showSprite && spriteOverlayStyle && (
+        <div
+          className="pointer-events-none"
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            bottom: 0,
+            zIndex: layerIndex + 2,
+            overflow: 'hidden',
+            backgroundColor: '#000',
+            ...spriteOverlayStyle,
+            ...transformStyle,
+            ...spriteMaskStyles,
+          }}
+        />
+      )}
+    </>
   )
 })
 
@@ -242,11 +582,11 @@ const ImageLayer = memo(function ImageLayer({
   buildVideoTransform,
   getClipTransform,
 }) {
-  // Get the current valid URL (may be regenerated after page refresh)
-  const clipUrl = useClipUrl(clip)
+  // Get the current valid URL (may be cached render or original)
+  const { url: clipUrl, isCached: isCachedRender } = useClipUrl(clip)
   
-  // Get mask effect styles if any
-  const maskStyles = useMaskEffectStyle(clip, playheadPosition)
+  // Get mask effect styles if any (skip if using cached render)
+  const maskStyles = useMaskEffectStyle(clip, playheadPosition, isCachedRender)
   
   if (!clipUrl) return null
 
@@ -541,57 +881,33 @@ function VideoLayerRenderer({
     )
   }
 
-  // Render transition if active
-  if (transitionInfo) {
-    const { clipA, clipB } = transitionInfo
-    
-    return (
-      <div ref={containerRef} className="relative w-full h-full">
-        {/* Video A (outgoing) */}
-        <VideoLayer
-          clip={clipA}
-          track={tracks.find(t => t.id === clipA.trackId)}
-          layerIndex={0}
-          totalLayers={2}
-          playheadPosition={playheadPosition}
-          isPlaying={isPlaying}
-          buildVideoTransform={(transform) => ({
-            ...buildVideoTransform(transform),
-            ...getTransitionStyles(transitionInfo, true),
-          })}
-          getClipTransform={getClipTransform}
-        />
-        
-        {/* Video B (incoming) */}
-        <VideoLayer
-          clip={clipB}
-          track={tracks.find(t => t.id === clipB.trackId)}
-          layerIndex={1}
-          totalLayers={2}
-          playheadPosition={playheadPosition}
-          isPlaying={isPlaying}
-          buildVideoTransform={(transform) => ({
-            ...buildVideoTransform(transform),
-            ...getTransitionStyles(transitionInfo, false),
-          })}
-          getClipTransform={getClipTransform}
-        />
-        
-        {/* Transition overlay (for fade effects) */}
-        {getTransitionOverlay(transitionInfo)}
-      </div>
-    )
-  }
-
-  // Separate video, image, and text clips
-  const videoClips = activeLayerClips.filter(({ clip }) => clip.type === 'video')
-  const imageClips = activeLayerClips.filter(({ clip }) => clip.type === 'image')
+  // Separate text clips (rendered on top)
   const textClips = activeLayerClips.filter(({ clip }) => clip.type === 'text')
   
   // Combined video and image layers (both render in the same z-order space)
   const mediaClips = activeLayerClips.filter(({ clip }) => clip.type === 'video' || clip.type === 'image')
 
-  // Render multi-layer composition
+  const getTransitionStyleForClip = (clip) => {
+    if (!transitionInfo || !clip) return null
+    
+    if (transitionInfo.transition?.kind === 'edge') {
+      if (transitionInfo.clip?.id !== clip.id) return null
+      const isOutgoing = transitionInfo.edge === 'out'
+      return getTransitionStyles(transitionInfo, isOutgoing)
+    }
+    
+    if (transitionInfo.clipA?.id === clip.id) {
+      return getTransitionStyles(transitionInfo, true)
+    }
+    
+    if (transitionInfo.clipB?.id === clip.id) {
+      return getTransitionStyles(transitionInfo, false)
+    }
+    
+    return null
+  }
+  
+  // Render multi-layer composition (including transitions)
   return (
     <div ref={containerRef} className="relative w-full h-full">
       {/* Video/Image layers */}
@@ -604,19 +920,30 @@ function VideoLayerRenderer({
             layerIndex={index}
             totalLayers={mediaClips.length}
             playheadPosition={playheadPosition}
-            buildVideoTransform={buildVideoTransform}
+            buildVideoTransform={(transform) => {
+              const transitionStyle = getTransitionStyleForClip(clip)
+              return transitionStyle
+                ? { ...buildVideoTransform(transform), ...transitionStyle }
+                : buildVideoTransform(transform)
+            }}
             getClipTransform={getClipTransform}
           />
         ) : (
           <VideoLayer
-            key={`${track.id}-${clip.id}`}
+            key={`vid-${track.id}-${clip.id}`}
             clip={clip}
             track={track}
             layerIndex={index}
             totalLayers={mediaClips.length}
             playheadPosition={playheadPosition}
             isPlaying={isPlaying}
-            buildVideoTransform={buildVideoTransform}
+            isInTransition={!!getTransitionStyleForClip(clip)}
+            buildVideoTransform={(transform) => {
+              const transitionStyle = getTransitionStyleForClip(clip)
+              return transitionStyle
+                ? { ...buildVideoTransform(transform), ...transitionStyle }
+                : buildVideoTransform(transform)
+            }}
             getClipTransform={getClipTransform}
           />
         )
@@ -635,8 +962,23 @@ function VideoLayerRenderer({
           getClipTransform={getClipTransform}
         />
       ))}
+      
+      {/* Transition overlay (for fade effects) */}
+      {transitionInfo ? getTransitionOverlay(transitionInfo) : null}
     </div>
   )
+}
+
+/**
+ * Clear a clip's entry from the disk cache URL map
+ * Call this when clearing a clip's render cache
+ */
+export function clearDiskCacheUrl(clipId) {
+  const url = diskCacheUrls.get(clipId)
+  if (url) {
+    URL.revokeObjectURL(url)
+    diskCacheUrls.delete(clipId)
+  }
 }
 
 export default memo(VideoLayerRenderer)

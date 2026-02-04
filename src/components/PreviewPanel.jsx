@@ -398,6 +398,7 @@ function PreviewPanel() {
   // NOTE: Video sync is now handled by VideoLayerRenderer component
 
   // Get transition styles based on type
+  // Uses will-change to hint GPU acceleration and backface-visibility for smoother rendering
   const getTransitionStyles = (transitionInfo, isVideoA) => {
     if (!transitionInfo) {
       return isVideoA ? { opacity: 1 } : { opacity: 0, display: 'none' }
@@ -405,54 +406,96 @@ function PreviewPanel() {
     
     const { transition, progress } = transitionInfo
     const type = transition?.type || 'dissolve'
+    const zoomAmount = transition?.settings?.zoomAmount ?? 0.1
+    const blurAmount = transition?.settings?.blurAmount ?? 8
+    const edgeMode = transition?.kind === 'edge'
+    const edge = transitionInfo?.edge
+    const effectiveIsVideoA = edgeMode ? edge === 'out' : isVideoA
+    
+    // Base styles for GPU-accelerated rendering
+    const baseStyles = {
+      position: 'absolute',
+      top: 0,
+      left: 0,
+      width: '100%',
+      height: '100%',
+      willChange: 'opacity, transform, clip-path',
+      backfaceVisibility: 'hidden',
+    }
+    
+    // Edge transitions: apply to a single clip (in or out)
+    if (edgeMode && (type === 'fade-black' || type === 'fade-white')) {
+      const opacity = effectiveIsVideoA ? 1 - progress : progress
+      return { ...baseStyles, opacity, zIndex: effectiveIsVideoA ? 1 : 2 }
+    }
     
     // Video A is outgoing, Video B is incoming
-    if (isVideoA) {
+    if (effectiveIsVideoA) {
       switch (type) {
         case 'dissolve':
-          return { opacity: 1 - progress, position: 'absolute' }
+          return { ...baseStyles, opacity: 1 - progress, zIndex: 1 }
         case 'fade-black':
         case 'fade-white':
           // Fade out to color then fade in
-          return { opacity: progress < 0.5 ? 1 - progress * 2 : 0, position: 'absolute' }
+          return { ...baseStyles, opacity: progress < 0.5 ? 1 - progress * 2 : 0, zIndex: 1 }
         case 'wipe-left':
-          return { clipPath: `inset(0 ${progress * 100}% 0 0)`, position: 'absolute' }
+          return { ...baseStyles, clipPath: `inset(0 ${progress * 100}% 0 0)`, zIndex: 2 }
         case 'wipe-right':
-          return { clipPath: `inset(0 0 0 ${progress * 100}%)`, position: 'absolute' }
+          return { ...baseStyles, clipPath: `inset(0 0 0 ${progress * 100}%)`, zIndex: 2 }
         case 'wipe-up':
-          return { clipPath: `inset(0 0 ${progress * 100}% 0)`, position: 'absolute' }
+          return { ...baseStyles, clipPath: `inset(0 0 ${progress * 100}% 0)`, zIndex: 2 }
         case 'wipe-down':
-          return { clipPath: `inset(${progress * 100}% 0 0 0)`, position: 'absolute' }
+          return { ...baseStyles, clipPath: `inset(${progress * 100}% 0 0 0)`, zIndex: 2 }
         case 'slide-left':
-          return { transform: `translateX(-${progress * 100}%)`, position: 'absolute' }
+          return { ...baseStyles, transform: `translateX(-${progress * 100}%)`, zIndex: 2 }
         case 'slide-right':
-          return { transform: `translateX(${progress * 100}%)`, position: 'absolute' }
+          return { ...baseStyles, transform: `translateX(${progress * 100}%)`, zIndex: 2 }
+        case 'slide-up':
+          return { ...baseStyles, transform: `translateY(-${progress * 100}%)`, zIndex: 2 }
+        case 'slide-down':
+          return { ...baseStyles, transform: `translateY(${progress * 100}%)`, zIndex: 2 }
+        case 'zoom-in':
+          return { ...baseStyles, transform: `scale(${1 + progress * zoomAmount})`, opacity: 1 - progress, zIndex: 1 }
+        case 'zoom-out':
+          return { ...baseStyles, transform: `scale(${1 - progress * zoomAmount})`, opacity: 1 - progress, zIndex: 1 }
+        case 'blur':
+          return { ...baseStyles, filter: `blur(${progress * blurAmount}px)`, opacity: 1 - progress, zIndex: 1 }
         default:
-          return { opacity: 1 - progress, position: 'absolute' }
+          return { ...baseStyles, opacity: 1 - progress, zIndex: 1 }
       }
     } else {
       // Video B (incoming)
       switch (type) {
         case 'dissolve':
-          return { opacity: progress, position: 'absolute', top: 0, left: 0 }
+          return { ...baseStyles, opacity: progress, zIndex: 2 }
         case 'fade-black':
         case 'fade-white':
           // Fade in from color
-          return { opacity: progress > 0.5 ? (progress - 0.5) * 2 : 0, position: 'absolute', top: 0, left: 0 }
+          return { ...baseStyles, opacity: progress > 0.5 ? (progress - 0.5) * 2 : 0, zIndex: 2 }
         case 'wipe-left':
-          return { clipPath: `inset(0 0 0 ${(1 - progress) * 100}%)`, position: 'absolute', top: 0, left: 0 }
+          return { ...baseStyles, clipPath: `inset(0 0 0 ${(1 - progress) * 100}%)`, zIndex: 1 }
         case 'wipe-right':
-          return { clipPath: `inset(0 ${(1 - progress) * 100}% 0 0)`, position: 'absolute', top: 0, left: 0 }
+          return { ...baseStyles, clipPath: `inset(0 ${(1 - progress) * 100}% 0 0)`, zIndex: 1 }
         case 'wipe-up':
-          return { clipPath: `inset(${(1 - progress) * 100}% 0 0 0)`, position: 'absolute', top: 0, left: 0 }
+          return { ...baseStyles, clipPath: `inset(${(1 - progress) * 100}% 0 0 0)`, zIndex: 1 }
         case 'wipe-down':
-          return { clipPath: `inset(0 0 ${(1 - progress) * 100}% 0)`, position: 'absolute', top: 0, left: 0 }
+          return { ...baseStyles, clipPath: `inset(0 0 ${(1 - progress) * 100}% 0)`, zIndex: 1 }
         case 'slide-left':
-          return { transform: `translateX(${(1 - progress) * 100}%)`, position: 'absolute', top: 0, left: 0 }
+          return { ...baseStyles, transform: `translateX(${(1 - progress) * 100}%)`, zIndex: 1 }
         case 'slide-right':
-          return { transform: `translateX(-${(1 - progress) * 100}%)`, position: 'absolute', top: 0, left: 0 }
+          return { ...baseStyles, transform: `translateX(-${(1 - progress) * 100}%)`, zIndex: 1 }
+        case 'slide-up':
+          return { ...baseStyles, transform: `translateY(${(1 - progress) * 100}%)`, zIndex: 1 }
+        case 'slide-down':
+          return { ...baseStyles, transform: `translateY(-${(1 - progress) * 100}%)`, zIndex: 1 }
+        case 'zoom-in':
+          return { ...baseStyles, transform: `scale(${1 - zoomAmount + progress * zoomAmount})`, opacity: progress, zIndex: 2 }
+        case 'zoom-out':
+          return { ...baseStyles, transform: `scale(${1 + zoomAmount - progress * zoomAmount})`, opacity: progress, zIndex: 2 }
+        case 'blur':
+          return { ...baseStyles, filter: `blur(${(1 - progress) * blurAmount}px)`, opacity: progress, zIndex: 2 }
         default:
-          return { opacity: progress, position: 'absolute', top: 0, left: 0 }
+          return { ...baseStyles, opacity: progress, zIndex: 2 }
       }
     }
   }
@@ -463,6 +506,18 @@ function PreviewPanel() {
     
     const { transition, progress } = transitionInfo
     const type = transition?.type
+    const edgeMode = transition?.kind === 'edge'
+    const edge = transitionInfo?.edge
+    
+    if (edgeMode && (type === 'fade-black' || type === 'fade-white')) {
+      const overlayOpacity = edge === 'in' ? (1 - progress) : progress
+      return (
+        <div
+          className={`absolute inset-0 pointer-events-none z-10 ${type === 'fade-black' ? 'bg-black' : 'bg-white'}`}
+          style={{ opacity: overlayOpacity }}
+        />
+      )
+    }
     
     if (type === 'fade-black') {
       const overlayOpacity = progress < 0.5 ? progress * 2 : (1 - progress) * 2

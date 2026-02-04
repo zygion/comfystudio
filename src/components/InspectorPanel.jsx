@@ -8,11 +8,15 @@ import {
   AlignVerticalJustifyStart, AlignVerticalJustifyCenter, AlignVerticalJustifyEnd,
   Diamond, ChevronFirst, ChevronLast,
   FileVideo, FileImage, FileAudio, HardDrive, Calendar, Info,
-  Wand2, Trash2, EyeOff, Plus
+  Wand2, Trash2, EyeOff, Plus, Play, Loader2, Check, AlertTriangle, X
 } from 'lucide-react'
 import useTimelineStore from '../stores/timelineStore'
 import useAssetsStore from '../stores/assetsStore'
+import useProjectStore from '../stores/projectStore'
+import renderCacheService from '../services/renderCache'
+import { saveRenderCache, deleteRenderCache } from '../services/fileSystem'
 import { getKeyframeAtTime, getAnimatedTransform, EASING_OPTIONS } from '../utils/keyframes'
+import { clearDiskCacheUrl } from './VideoLayerRenderer'
 
 // Draggable number input component - click and drag to change value
 function DraggableNumberInput({ value, onChange, onCommit, min, max, step = 1, sensitivity = 0.5, suffix = '', className = '' }) {
@@ -221,6 +225,8 @@ function KeyframeButton({ clipId, property, clip, playheadPosition }) {
 function InspectorPanel({ isExpanded, onToggleExpanded }) {
   const [expandedSections, setExpandedSections] = useState(['transform', 'crop', 'timing', 'effects', 'text', 'style'])
   const [showMaskPicker, setShowMaskPicker] = useState(false)
+  const [renderProgress, setRenderProgress] = useState(null) // { status, progress, error }
+  const [isRendering, setIsRendering] = useState(false)
   
   // Get selected clip from timeline store
   const { 
@@ -242,7 +248,14 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
     toggleEffect,
     addMaskEffect,
     getClipEffects,
+    // Cache
+    setCacheStatus,
+    setCacheUrl,
+    clearClipCache,
   } = useTimelineStore()
+  
+  // Get assets store functions (needed for render cache)
+  const { assets, getAssetById, getAllMasks } = useAssetsStore()
   
   // Get the first selected clip (for now, single selection for inspector)
   const selectedClip = selectedClipIds.length > 0 
@@ -336,6 +349,109 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
         : [...prev, section]
     )
   }
+
+  // Get project handle for saving cache to disk
+  const { currentProjectHandle } = useProjectStore()
+
+  // Handle render cache for clips with effects
+  const handleRenderCache = useCallback(async () => {
+    if (!selectedClip || isRendering) return
+    
+    const enabledEffects = (selectedClip.effects || []).filter(e => e.enabled)
+    if (enabledEffects.length === 0) return
+
+    // Get the video URL
+    const asset = getAssetById(selectedClip.assetId)
+    const videoUrl = asset?.url || selectedClip.url
+    if (!videoUrl) {
+      setRenderProgress({ status: 'error', error: 'No video URL found' })
+      return
+    }
+
+    setIsRendering(true)
+    setCacheStatus(selectedClip.id, 'rendering', 0)
+    setRenderProgress({ status: 'starting', progress: 0 })
+
+    try {
+      // Get the blob from render service
+      const { blobUrl, blob } = await renderCacheService.renderClipWithEffects(
+        selectedClip,
+        videoUrl,
+        enabledEffects,
+        getAssetById,
+        {
+          fps: 30,
+          onProgress: (progress) => {
+            setRenderProgress(progress)
+            if (progress.progress !== undefined) {
+              setCacheStatus(selectedClip.id, 'rendering', progress.progress)
+            }
+          }
+        }
+      )
+
+      // Save to disk if we have a project handle
+      let cachePath = null
+      if (currentProjectHandle && blob) {
+        try {
+          setRenderProgress({ status: 'saving', progress: 98 })
+          cachePath = await saveRenderCache(currentProjectHandle, selectedClip.id, blob, {
+            clipId: selectedClip.id,
+            duration: selectedClip.duration,
+            effects: enabledEffects.map(e => ({ id: e.id, type: e.type })),
+          })
+          console.log('Saved render cache to:', cachePath)
+        } catch (saveErr) {
+          console.warn('Failed to save cache to disk:', saveErr)
+          // Continue with blob URL even if disk save fails
+        }
+      }
+
+      // Store the cached URL in the clip (and path if saved)
+      setCacheUrl(selectedClip.id, blobUrl, cachePath)
+      setRenderProgress({ status: 'complete', progress: 100 })
+    } catch (err) {
+      console.error('Render cache failed:', err)
+      setRenderProgress({ status: 'error', error: err.message })
+      setCacheStatus(selectedClip.id, 'none', 0)
+    } finally {
+      setIsRendering(false)
+    }
+  }, [selectedClip, isRendering, getAssetById, setCacheStatus, setCacheUrl, currentProjectHandle])
+
+  // Cancel render
+  const handleCancelRender = useCallback(() => {
+    if (selectedClip && isRendering) {
+      renderCacheService.cancelRender(selectedClip.id)
+      setIsRendering(false)
+      setRenderProgress(null)
+      setCacheStatus(selectedClip.id, 'none', 0)
+    }
+  }, [selectedClip, isRendering, setCacheStatus])
+
+  // Clear cache
+  const handleClearCache = useCallback(async () => {
+    if (selectedClip) {
+      // Clear from memory (render cache service)
+      renderCacheService.clearCache(selectedClip.id)
+      
+      // Clear from disk cache URL map (VideoLayerRenderer)
+      clearDiskCacheUrl(selectedClip.id)
+      
+      // Delete from disk if we have a cache path
+      if (selectedClip.cachePath && currentProjectHandle) {
+        try {
+          await deleteRenderCache(currentProjectHandle, selectedClip.cachePath)
+          console.log('Deleted render cache from disk:', selectedClip.cachePath)
+        } catch (err) {
+          console.warn('Failed to delete cache from disk:', err)
+        }
+      }
+      
+      clearClipCache(selectedClip.id)
+      setRenderProgress(null)
+    }
+  }, [selectedClip, clearClipCache, currentProjectHandle])
 
   const renderSectionHeader = (id, title, icon) => {
     const Icon = icon
@@ -927,6 +1043,98 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
               </div>
             ))}
             
+            {/* Render Cache Section - Only show if clip has effects */}
+            {(selectedClip.effects || []).some(e => e.enabled) && (
+              <div className="bg-sf-dark-800 rounded p-3 space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] text-sf-text-secondary uppercase tracking-wider">Render Cache</span>
+                  {/* Cache Status Badge */}
+                  {selectedClip.cacheStatus === 'cached' && (
+                    <span className="flex items-center gap-1 text-[9px] text-green-400">
+                      <Check className="w-3 h-3" />
+                      Cached
+                    </span>
+                  )}
+                  {selectedClip.cacheStatus === 'invalid' && (
+                    <span className="flex items-center gap-1 text-[9px] text-yellow-400">
+                      <AlertTriangle className="w-3 h-3" />
+                      Outdated
+                    </span>
+                  )}
+                  {(!selectedClip.cacheStatus || selectedClip.cacheStatus === 'none') && (
+                    <span className="flex items-center gap-1 text-[9px] text-sf-text-muted">
+                      Not cached
+                    </span>
+                  )}
+                </div>
+                
+                {/* Progress Bar (when rendering) */}
+                {isRendering && renderProgress && (
+                  <div className="space-y-1">
+                    <div className="h-1.5 bg-sf-dark-600 rounded-full overflow-hidden">
+                      <div 
+                        className="h-full bg-purple-500 transition-all duration-200"
+                        style={{ width: `${renderProgress.progress || 0}%` }}
+                      />
+                    </div>
+                    <p className="text-[9px] text-sf-text-muted">
+                      {renderProgress.status === 'loading' && 'Loading video...'}
+                      {renderProgress.status === 'loading_masks' && 'Loading mask frames...'}
+                      {renderProgress.status === 'rendering' && `Rendering frame ${renderProgress.frame || 0}/${renderProgress.totalFrames || '?'}...`}
+                      {renderProgress.status === 'encoding' && 'Encoding video...'}
+                    </p>
+                  </div>
+                )}
+                
+                {/* Error message */}
+                {renderProgress?.status === 'error' && (
+                  <p className="text-[9px] text-red-400">
+                    Error: {renderProgress.error}
+                  </p>
+                )}
+                
+                {/* Action Buttons */}
+                <div className="flex gap-2">
+                  {!isRendering ? (
+                    <>
+                      <button
+                        onClick={handleRenderCache}
+                        className="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-purple-600 hover:bg-purple-500 text-white text-[10px] rounded transition-colors"
+                      >
+                        <Play className="w-3 h-3" />
+                        {selectedClip.cacheStatus === 'cached' ? 'Re-render' : 
+                         selectedClip.cacheStatus === 'invalid' ? 'Update Cache' : 'Render Cache'}
+                      </button>
+                      {selectedClip.cacheStatus === 'cached' && (
+                        <button
+                          onClick={handleClearCache}
+                          className="px-2 py-1.5 bg-sf-dark-600 hover:bg-sf-dark-500 text-sf-text-muted hover:text-sf-text-primary text-[10px] rounded transition-colors"
+                          title="Clear cache"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                        </button>
+                      )}
+                    </>
+                  ) : (
+                    <button
+                      onClick={handleCancelRender}
+                      className="flex-1 flex items-center justify-center gap-1.5 py-1.5 bg-red-600 hover:bg-red-500 text-white text-[10px] rounded transition-colors"
+                    >
+                      <X className="w-3 h-3" />
+                      Cancel
+                    </button>
+                  )}
+                </div>
+                
+                {/* Info text */}
+                <p className="text-[9px] text-sf-text-muted">
+                  {selectedClip.cacheStatus === 'cached' 
+                    ? 'Using cached render for smooth playback'
+                    : 'Render cache for smooth masked playback'}
+                </p>
+              </div>
+            )}
+            
             {/* Add Mask Effect Button */}
             {availableMasks.length > 0 && (
               <div className="relative">
@@ -1503,8 +1711,8 @@ function InspectorPanel({ isExpanded, onToggleExpanded }) {
     </>
   )
 
-  // Get current preview and mask assets from assets store
-  const { currentPreview, previewMode, assets, getAssetById, getAllMasks } = useAssetsStore()
+  // Get current preview from assets store (assets, getAssetById, getAllMasks already destructured above)
+  const { currentPreview, previewMode } = useAssetsStore()
   
   // Get available mask assets for the effect picker
   const availableMasks = useMemo(() => {

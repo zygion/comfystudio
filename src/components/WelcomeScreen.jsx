@@ -18,9 +18,10 @@ function WelcomeScreen() {
     checkBrowserSupport,
     selectDefaultProjectsLocation,
     openProjectFromPicker,
-    openProject,
+    openRecentProject,
     clearError,
     getRecentProjectsList,
+    isElectronMode,
   } = useProjectStore()
   
   const isBrowserSupported = checkBrowserSupport()
@@ -61,9 +62,8 @@ function WelcomeScreen() {
   
   // Handle opening a recent project
   const handleOpenRecent = async (project) => {
-    if (project.handle) {
-      await openProject(project.handle)
-    }
+    // Use the unified openRecentProject function which handles both Electron and web modes
+    await openRecentProject(project)
   }
   
   // First-run setup screen
@@ -80,8 +80,8 @@ function WelcomeScreen() {
             <p className="text-sf-text-muted text-sm">AI-Powered Video Editing Studio</p>
           </div>
           
-          {/* Browser Support Warning */}
-          {!isBrowserSupported && (
+          {/* Browser Support Warning - only show in web mode */}
+          {!isBrowserSupported && !isElectronMode() && (
             <div className="mb-6 p-4 bg-sf-error/20 border border-sf-error/50 rounded-lg">
               <div className="flex items-start gap-3">
                 <AlertCircle className="w-5 h-5 text-sf-error flex-shrink-0 mt-0.5" />
@@ -126,7 +126,7 @@ function WelcomeScreen() {
             {/* Action Button */}
             <button
               onClick={selectDefaultProjectsLocation}
-              disabled={!isBrowserSupported || isLoading}
+              disabled={(!isBrowserSupported && !isElectronMode()) || isLoading}
               className="w-full flex items-center justify-center gap-2 px-4 py-3 bg-sf-blue hover:bg-sf-blue-hover disabled:bg-sf-dark-700 disabled:cursor-not-allowed rounded-lg text-white font-medium transition-colors"
             >
               {isLoading ? (

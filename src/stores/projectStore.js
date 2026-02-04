@@ -1,6 +1,7 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
 import {
+  isElectron,
   isFileSystemSupported,
   requestDirectoryAccess,
   createProjectFolder,
@@ -74,21 +75,38 @@ const createDefaultTimeline = (name = 'Timeline 1', id = null, settings = null) 
 })
 
 /**
+ * Helper to get display name from path or handle
+ */
+const getDisplayName = (handleOrPath) => {
+  if (!handleOrPath) return null
+  if (typeof handleOrPath === 'string') {
+    // It's a path - get the last segment
+    const parts = handleOrPath.replace(/\\/g, '/').split('/')
+    return parts[parts.length - 1] || handleOrPath
+  }
+  // It's a handle
+  return handleOrPath.name
+}
+
+/**
  * Project Store
  * Manages project state, recent projects, and file system operations
  * Supports multiple timelines per project
+ * 
+ * In Electron mode: uses string paths
+ * In Web mode: uses FileSystemDirectoryHandle objects
  */
 export const useProjectStore = create(
   persist(
     (set, get) => ({
       // Current project state
       currentProject: null, // { name, settings, created, modified, timelines, currentTimelineId }
-      currentProjectHandle: null, // FileSystemDirectoryHandle (not persisted)
+      currentProjectHandle: null, // FileSystemDirectoryHandle (web) or string path (Electron) - not persisted
       currentTimelineId: null, // ID of the currently active timeline
       
       // Default projects location
       defaultProjectsLocation: null, // Path string for display
-      defaultProjectsHandle: null, // FileSystemDirectoryHandle (not persisted)
+      defaultProjectsHandle: null, // FileSystemDirectoryHandle (web) or string path (Electron) - not persisted
       
       // Recent projects list (persisted)
       recentProjects: [], // [{ name, path, modified, settings, thumbnail }]
@@ -111,32 +129,40 @@ export const useProjectStore = create(
       },
       
       /**
+       * Check if running in Electron
+       */
+      isElectronMode: () => {
+        return isElectron()
+      },
+      
+      /**
        * Initialize the store on app load
-       * Attempts to restore directory handles from IndexedDB
+       * Attempts to restore directory handles/paths from storage
        */
       initialize: async () => {
         set({ isLoading: true, error: null })
         
         try {
-          // Try to restore default projects location handle
-          const storedDefaultHandle = await getStoredDirectoryHandle('defaultProjectsLocation')
-          if (storedDefaultHandle) {
-            const hasPermission = await verifyPermission(storedDefaultHandle)
-            if (hasPermission) {
+          // Try to restore default projects location
+          const storedDefault = await getStoredDirectoryHandle('defaultProjectsLocation')
+          if (storedDefault) {
+            const isValid = await verifyPermission(storedDefault)
+            if (isValid) {
               set({ 
-                defaultProjectsHandle: storedDefaultHandle,
+                defaultProjectsHandle: storedDefault,
+                defaultProjectsLocation: getDisplayName(storedDefault),
                 isFirstRun: false,
               })
             }
           }
           
-          // Try to restore current project handle
-          const storedProjectHandle = await getStoredDirectoryHandle('currentProject')
-          if (storedProjectHandle) {
-            const hasPermission = await verifyPermission(storedProjectHandle)
-            if (hasPermission) {
+          // Try to restore current project
+          const storedProject = await getStoredDirectoryHandle('currentProject')
+          if (storedProject) {
+            const isValid = await verifyPermission(storedProject)
+            if (isValid) {
               // Load project data
-              const projectData = await loadProjectFromFile(storedProjectHandle)
+              const projectData = await loadProjectFromFile(storedProject)
               if (projectData) {
                 // Get the current/first timeline
                 const currentTimelineId = projectData.currentTimelineId || projectData.timelines?.[0]?.id
@@ -149,12 +175,19 @@ export const useProjectStore = create(
                 
                 // Regenerate asset URLs from project files
                 if (projectData.assets) {
-                  await useAssetsStore.getState().loadFromProject(projectData.assets, storedProjectHandle)
+                  await useAssetsStore.getState().loadFromProject(projectData.assets, storedProject)
+                }
+                
+                // Load thumbnail sprites in background (Electron only)
+                if (typeof storedProject === 'string') {
+                  useAssetsStore.getState().loadSpritesFromProject(storedProject).catch(err => {
+                    console.warn('Failed to load sprites:', err)
+                  })
                 }
                 
                 set({
                   currentProject: projectData,
-                  currentProjectHandle: storedProjectHandle,
+                  currentProjectHandle: storedProject,
                   currentTimelineId: currentTimelineId,
                 })
               }
@@ -170,16 +203,16 @@ export const useProjectStore = create(
       
       /**
        * Set the default projects location
-       * @param {FileSystemDirectoryHandle} handle - The directory handle
+       * @param {FileSystemDirectoryHandle|string} handleOrPath - The directory handle or path
        */
-      setDefaultProjectsLocation: async (handle) => {
-        if (!handle) return
+      setDefaultProjectsLocation: async (handleOrPath) => {
+        if (!handleOrPath) return
         
         try {
-          await storeDirectoryHandle('defaultProjectsLocation', handle)
+          await storeDirectoryHandle('defaultProjectsLocation', handleOrPath)
           set({ 
-            defaultProjectsHandle: handle,
-            defaultProjectsLocation: handle.name,
+            defaultProjectsHandle: handleOrPath,
+            defaultProjectsLocation: getDisplayName(handleOrPath),
             isFirstRun: false,
           })
         } catch (err) {
@@ -193,9 +226,9 @@ export const useProjectStore = create(
        */
       selectDefaultProjectsLocation: async () => {
         try {
-          const handle = await requestDirectoryAccess('Select Projects Folder')
-          if (handle) {
-            await get().setDefaultProjectsLocation(handle)
+          const handleOrPath = await requestDirectoryAccess('Select Projects Folder')
+          if (handleOrPath) {
+            await get().setDefaultProjectsLocation(handleOrPath)
             return true
           }
           return false
@@ -226,7 +259,7 @@ export const useProjectStore = create(
         
         try {
           // Create project folder structure
-          const projectHandle = await createProjectFolder(state.defaultProjectsHandle, name)
+          const projectHandleOrPath = await createProjectFolder(state.defaultProjectsHandle, name)
           
           // Create default timeline
           const defaultTimeline = createDefaultTimeline('Timeline 1')
@@ -249,14 +282,15 @@ export const useProjectStore = create(
           }
           
           // Save project file
-          await saveProjectToFile(projectHandle, projectData)
+          await saveProjectToFile(projectHandleOrPath, projectData)
           
-          // Store handle for persistence
-          await storeDirectoryHandle('currentProject', projectHandle)
+          // Store handle/path for persistence
+          await storeDirectoryHandle('currentProject', projectHandleOrPath)
           
           // Add to recent projects
           const recentProject = {
             name,
+            path: typeof projectHandleOrPath === 'string' ? projectHandleOrPath : null, // Store path in Electron mode
             modified: projectData.modified,
             created: projectData.created,
             settings: projectData.settings,
@@ -265,11 +299,11 @@ export const useProjectStore = create(
           
           // Load the first timeline into the timeline store
           useTimelineStore.getState().loadFromProject(defaultTimeline)
-          await useAssetsStore.getState().loadFromProject(projectData.assets, projectHandle)
+          await useAssetsStore.getState().loadFromProject(projectData.assets, projectHandleOrPath)
           
           set((state) => ({
             currentProject: projectData,
-            currentProjectHandle: projectHandle,
+            currentProjectHandle: projectHandleOrPath,
             currentTimelineId: defaultTimeline.id,
             recentProjects: [recentProject, ...state.recentProjects.filter(p => p.name !== name)].slice(0, 10),
             isLoading: false,
@@ -285,26 +319,26 @@ export const useProjectStore = create(
       
       /**
        * Open an existing project
-       * @param {FileSystemDirectoryHandle} projectHandle - The project directory handle
+       * @param {FileSystemDirectoryHandle|string} projectHandleOrPath - The project directory handle or path
        */
-      openProject: async (projectHandle) => {
+      openProject: async (projectHandleOrPath) => {
         set({ isLoading: true, error: null })
         
         try {
-          // Verify permission
-          const hasPermission = await verifyPermission(projectHandle)
-          if (!hasPermission) {
-            throw new Error('Permission denied to access project folder')
+          // Verify permission/existence
+          const isValid = await verifyPermission(projectHandleOrPath)
+          if (!isValid) {
+            throw new Error('Permission denied or project folder not accessible')
           }
           
           // Load project data
-          const projectData = await loadProjectFromFile(projectHandle)
+          const projectData = await loadProjectFromFile(projectHandleOrPath)
           if (!projectData) {
             throw new Error('Invalid project file')
           }
           
-          // Store handle for persistence
-          await storeDirectoryHandle('currentProject', projectHandle)
+          // Store handle/path for persistence
+          await storeDirectoryHandle('currentProject', projectHandleOrPath)
           
           // Handle legacy projects (single timeline) - migrate to multi-timeline format
           if (projectData.timeline && !projectData.timelines) {
@@ -332,11 +366,19 @@ export const useProjectStore = create(
           
           // Load timeline and assets data into their respective stores
           useTimelineStore.getState().loadFromProject(currentTimeline)
-          await useAssetsStore.getState().loadFromProject(projectData.assets, projectHandle)
+          await useAssetsStore.getState().loadFromProject(projectData.assets, projectHandleOrPath)
+          
+          // Load thumbnail sprites in background (Electron only)
+          if (typeof projectHandleOrPath === 'string') {
+            useAssetsStore.getState().loadSpritesFromProject(projectHandleOrPath).catch(err => {
+              console.warn('Failed to load sprites:', err)
+            })
+          }
           
           // Update recent projects
           const recentProject = {
             name: projectData.name,
+            path: typeof projectHandleOrPath === 'string' ? projectHandleOrPath : null,
             modified: projectData.modified,
             created: projectData.created,
             settings: projectData.settings,
@@ -345,7 +387,7 @@ export const useProjectStore = create(
           
           set((state) => ({
             currentProject: projectData,
-            currentProjectHandle: projectHandle,
+            currentProjectHandle: projectHandleOrPath,
             currentTimelineId: currentTimeline.id,
             recentProjects: [recentProject, ...state.recentProjects.filter(p => p.name !== projectData.name)].slice(0, 10),
             isLoading: false,
@@ -364,9 +406,9 @@ export const useProjectStore = create(
        */
       openProjectFromPicker: async () => {
         try {
-          const handle = await requestDirectoryAccess('Select Project Folder')
-          if (handle) {
-            return await get().openProject(handle)
+          const handleOrPath = await requestDirectoryAccess('Select Project Folder')
+          if (handleOrPath) {
+            return await get().openProject(handleOrPath)
           }
           return null
         } catch (err) {
@@ -688,7 +730,8 @@ export const useProjectStore = create(
       },
       
       /**
-       * Get list of recent projects with handles (for display)
+       * Get list of recent projects (for display)
+       * In Electron mode, can refresh from file system
        */
       getRecentProjectsList: async () => {
         const state = get()
@@ -708,6 +751,8 @@ export const useProjectStore = create(
               return {
                 ...recent,
                 ...fresh,
+                // In Electron mode, use the path from fresh data
+                path: fresh.path || recent.path,
               }
             }
             return recent
@@ -718,6 +763,42 @@ export const useProjectStore = create(
           console.error('Error getting recent projects:', err)
           return state.recentProjects
         }
+      },
+      
+      /**
+       * Open a recent project by name or path
+       * @param {object} recentProject - Recent project object with name and optional path
+       */
+      openRecentProject: async (recentProject) => {
+        const state = get()
+        
+        if (isElectron()) {
+          // In Electron mode, use the path if available
+          if (recentProject.path) {
+            return await get().openProject(recentProject.path)
+          }
+          // Otherwise try to find it in the default projects location
+          if (state.defaultProjectsHandle) {
+            const projectPath = await window.electronAPI.pathJoin(state.defaultProjectsHandle, recentProject.name)
+            return await get().openProject(projectPath)
+          }
+        } else {
+          // In web mode, we need to get the handle from the projects list
+          if (!state.defaultProjectsHandle) {
+            set({ error: 'Projects location not set' })
+            return null
+          }
+          
+          // Find the project handle
+          const projects = await listProjects(state.defaultProjectsHandle)
+          const project = projects.find(p => p.name === recentProject.name)
+          if (project?.handle) {
+            return await get().openProject(project.handle)
+          }
+        }
+        
+        set({ error: `Could not find project: ${recentProject.name}` })
+        return null
       },
       
       /**
@@ -745,6 +826,13 @@ export const useProjectStore = create(
       setAutoSaveEnabled: (enabled) => {
         set({ autoSaveEnabled: enabled })
       },
+      
+      /**
+       * Get the current project handle/path for file operations
+       */
+      getProjectHandle: () => {
+        return get().currentProjectHandle
+      },
     }),
     {
       name: 'storyflow-project', // localStorage key
@@ -755,7 +843,7 @@ export const useProjectStore = create(
         defaultProjectsLocation: state.defaultProjectsLocation,
         autoSaveEnabled: state.autoSaveEnabled,
         autoSaveInterval: state.autoSaveInterval,
-        // Note: Handles are stored in IndexedDB, not localStorage
+        // Note: Handles/paths are stored separately (IndexedDB for web, settings for Electron)
       }),
     }
   )

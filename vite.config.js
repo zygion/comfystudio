@@ -2,8 +2,12 @@ import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import path from 'path'
 
+// Detect if building for Electron
+const isElectron = process.env.ELECTRON === 'true'
+
 export default defineConfig({
   plugins: [react()],
+  // Use relative paths for Electron (file:// protocol)
   base: './',
   resolve: {
     alias: {
@@ -101,5 +105,22 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    // Ensure assets are relative for Electron
+    assetsDir: 'assets',
+    // Generate sourcemaps for debugging (optional, can disable for production)
+    sourcemap: isElectron ? false : true,
+    // Rollup options for better chunking
+    rollupOptions: {
+      output: {
+        // Consistent chunk naming
+        chunkFileNames: 'assets/[name]-[hash].js',
+        entryFileNames: 'assets/[name]-[hash].js',
+        assetFileNames: 'assets/[name]-[hash].[ext]',
+      },
+    },
+  },
+  // Optimize deps for Electron
+  optimizeDeps: {
+    exclude: [],
   },
 })

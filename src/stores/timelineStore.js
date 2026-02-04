@@ -1,5 +1,6 @@
 import { create } from 'zustand'
 import { persist } from 'zustand/middleware'
+import { TRANSITION_DEFAULT_SETTINGS } from '../constants/transitions'
 
 // Maximum number of undo states to keep
 const MAX_HISTORY_SIZE = 50
@@ -37,7 +38,8 @@ export const useTimelineStore = create(
   clips: [],
   
   // Transitions between clips
-  // Types: 'dissolve', 'fade-black', 'fade-white', 'wipe-left', 'wipe-right', 'wipe-up', 'wipe-down', 'slide-left', 'slide-right'
+  // Types: 'dissolve', 'fade-black', 'fade-white', 'wipe-left', 'wipe-right', 'wipe-up', 'wipe-down',
+  //        'slide-left', 'slide-right', 'slide-up', 'slide-down', 'zoom-in', 'zoom-out', 'blur'
   transitions: [],
   
   // Selected clips (multi-select support)
@@ -307,9 +309,16 @@ export const useTimelineStore = create(
     
     // For images, use a default duration but allow extending (images have infinite source)
     // For videos/audio, use the actual source duration
+    // Check both asset.duration and asset.settings.duration (different sources store it differently)
     const isImage = asset.type === 'image'
-    const sourceDuration = isImage ? Infinity : (asset.settings?.duration || 5)
+    const assetDuration = asset.duration || asset.settings?.duration || null
+    const sourceDuration = isImage ? Infinity : (assetDuration || 5)
     const defaultDuration = isImage ? 5 : sourceDuration // Images default to 5s but can be extended
+    
+    // Log a warning if we couldn't get the actual duration
+    if (!isImage && !assetDuration) {
+      console.warn(`Could not get duration for asset "${asset.name}", defaulting to 5 seconds`)
+    }
     
     const newClip = {
       id: `clip-${state.clipCounter}`,
@@ -1215,7 +1224,9 @@ export const useTimelineStore = create(
         const effects = clip.effects || []
         return {
           ...clip,
-          effects: [...effects, newEffect]
+          effects: [...effects, newEffect],
+          // Invalidate cache when effects change
+          cacheStatus: clip.cacheStatus === 'cached' ? 'invalid' : clip.cacheStatus,
         }
       })
     }))
@@ -1236,9 +1247,14 @@ export const useTimelineStore = create(
         if (clip.id !== clipId) return clip
         
         const effects = clip.effects || []
+        const newEffects = effects.filter(e => e.id !== effectId)
         return {
           ...clip,
-          effects: effects.filter(e => e.id !== effectId)
+          effects: newEffects,
+          // Invalidate cache when effects change, or clear if no effects left
+          cacheStatus: newEffects.length === 0 ? 'none' : 
+                      (clip.cacheStatus === 'cached' ? 'invalid' : clip.cacheStatus),
+          cacheUrl: newEffects.length === 0 ? null : clip.cacheUrl,
         }
       })
     }))
@@ -1265,7 +1281,9 @@ export const useTimelineStore = create(
           ...clip,
           effects: effects.map(e => 
             e.id === effectId ? { ...e, ...updates } : e
-          )
+          ),
+          // Invalidate cache when effect properties change
+          cacheStatus: clip.cacheStatus === 'cached' ? 'invalid' : clip.cacheStatus,
         }
       })
     }))
@@ -1288,7 +1306,9 @@ export const useTimelineStore = create(
           ...clip,
           effects: effects.map(e => 
             e.id === effectId ? { ...e, enabled: !e.enabled } : e
-          )
+          ),
+          // Invalidate cache when effect is toggled
+          cacheStatus: clip.cacheStatus === 'cached' ? 'invalid' : clip.cacheStatus,
         }
       })
     }))
@@ -1362,6 +1382,120 @@ export const useTimelineStore = create(
 
   // ==================== END EFFECTS MANAGEMENT ====================
 
+  // ==================== RENDER CACHE MANAGEMENT ====================
+
+  /**
+   * Set the render cache status for a clip
+   * @param {string} clipId - The clip ID
+   * @param {string} status - Cache status: 'none', 'rendering', 'cached', 'invalid'
+   * @param {number} progress - Render progress (0-100) when rendering
+   */
+  setCacheStatus: (clipId, status, progress = 0) => {
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        return {
+          ...clip,
+          cacheStatus: status,
+          cacheProgress: progress,
+        }
+      })
+    }))
+  },
+
+  /**
+   * Set the cached video URL for a clip
+   * @param {string} clipId - The clip ID  
+   * @param {string} cacheUrl - Blob URL of the cached video
+   * @param {string} cachePath - Optional path to the cached file on disk
+   */
+  setCacheUrl: (clipId, cacheUrl, cachePath = null) => {
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        return {
+          ...clip,
+          cacheUrl,
+          cachePath, // Path to the file on disk (for persistence)
+          cacheStatus: cacheUrl ? 'cached' : 'none',
+          cacheProgress: cacheUrl ? 100 : 0,
+        }
+      })
+    }))
+  },
+
+  /**
+   * Invalidate cache for a clip (e.g., when effects change)
+   * @param {string} clipId - The clip ID
+   */
+  invalidateCache: (clipId) => {
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        // Only invalidate if there was a cache
+        if (clip.cacheStatus === 'cached' || clip.cacheUrl) {
+          return {
+            ...clip,
+            cacheStatus: 'invalid',
+            // Keep cacheUrl for now - will be revoked when new cache is created
+          }
+        }
+        return clip
+      })
+    }))
+  },
+
+  /**
+   * Clear cache for a clip
+   * @param {string} clipId - The clip ID
+   */
+  clearClipCache: (clipId) => {
+    set((state) => ({
+      clips: state.clips.map(clip => {
+        if (clip.id !== clipId) return clip
+        return {
+          ...clip,
+          cacheStatus: 'none',
+          cacheProgress: 0,
+          cacheUrl: null,
+        }
+      })
+    }))
+  },
+
+  /**
+   * Get cache status for a clip
+   * @param {string} clipId - The clip ID
+   * @returns {object} { status, progress, url }
+   */
+  getClipCacheStatus: (clipId) => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    return {
+      status: clip?.cacheStatus || 'none',
+      progress: clip?.cacheProgress || 0,
+      url: clip?.cacheUrl || null,
+    }
+  },
+
+  /**
+   * Check if a clip needs caching (has effects but no valid cache)
+   * @param {string} clipId - The clip ID
+   * @returns {boolean}
+   */
+  clipNeedsCache: (clipId) => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    if (!clip) return false
+    
+    const hasEffects = (clip.effects || []).some(e => e.enabled)
+    const hasValidCache = clip.cacheStatus === 'cached' && clip.cacheUrl
+    
+    return hasEffects && !hasValidCache
+  },
+
+  // ==================== END RENDER CACHE MANAGEMENT ====================
+
   /**
    * Trim a clip from the left (adjust in-point)
    */
@@ -1408,7 +1542,76 @@ export const useTimelineStore = create(
   },
 
   /**
-   * Add a transition between two clips
+   * Calculate available handles for a clip
+   * Head handle = trimStart (footage available before current in-point)
+   * Tail handle = sourceDuration - trimEnd (footage available after current out-point)
+   */
+  getClipHandles: (clipId) => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    if (!clip) return { head: 0, tail: 0 }
+    
+    const headHandle = clip.trimStart || 0
+    const tailHandle = (clip.sourceDuration || clip.duration) - (clip.trimEnd || clip.duration)
+    
+    return {
+      head: Math.max(0, headHandle),
+      tail: Math.max(0, tailHandle)
+    }
+  },
+
+  /**
+   * Calculate max transition duration between two clips
+   * Limited by available handles on both clips
+   */
+  getMaxTransitionDuration: (clipAId, clipBId) => {
+    const state = get()
+    const clipA = state.clips.find(c => c.id === clipAId)
+    const clipB = state.clips.find(c => c.id === clipBId)
+    
+    if (!clipA || !clipB) return 0
+    
+    // ClipA needs tail handle (to extend past its current end)
+    const clipAHandles = get().getClipHandles(clipAId)
+    // ClipB needs head handle (to start earlier than its current start)
+    const clipBHandles = get().getClipHandles(clipBId)
+    
+    // Max duration is limited by both handles
+    // Each clip contributes half the transition duration
+    const maxFromA = clipAHandles.tail * 2
+    const maxFromB = clipBHandles.head * 2
+    
+    // Also limited by clip durations (can't transition longer than the clip)
+    const maxFromClipA = clipA.duration
+    const maxFromClipB = clipB.duration
+    
+    return Math.min(maxFromA, maxFromB, maxFromClipA, maxFromClipB)
+  },
+
+  /**
+   * Calculate max transition duration for a single clip edge (in/out)
+   * Limited by the clip's duration
+   */
+  getMaxEdgeTransitionDuration: (clipId) => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    if (!clip) return 0
+    return Math.max(0, clip.duration)
+  },
+
+  /**
+   * Build transition settings with defaults
+   */
+  buildTransitionSettings: (type, settings = {}) => {
+    return {
+      ...(TRANSITION_DEFAULT_SETTINGS[type] || {}),
+      ...(settings || {})
+    }
+  },
+
+  /**
+   * Add a transition between two clips (Resolve-style)
+   * This creates actual overlap by extending clipA and starting clipB earlier
    */
   addTransition: (clipAId, clipBId, transitionType = 'dissolve', duration = 0.5) => {
     const state = get()
@@ -1424,15 +1627,107 @@ export const useTimelineStore = create(
     )
     if (existingTransition) return existingTransition
     
+    // Validate that clips are on the same track and adjacent
+    if (clipA.trackId !== clipB.trackId) {
+      console.warn('Cannot add transition between clips on different tracks')
+      return null
+    }
+    
+    // Get max allowed transition duration based on available handles
+    const maxDuration = get().getMaxTransitionDuration(clipAId, clipBId)
+    if (maxDuration < 0.1) {
+      console.warn('Insufficient handles for transition. Need more footage before/after trim points.')
+      return null
+    }
+    
+    // Clamp duration to available handles
+    const actualDuration = Math.min(duration, maxDuration)
+    const halfDuration = actualDuration / 2
+    
+    // Store the original edit point (where clips meet)
+    const editPoint = clipA.startTime + clipA.duration
+    
     // Save to history before modifying
     get().saveToHistory()
     
     const newTransition = {
       id: `transition-${state.transitionCounter}`,
+      kind: 'between',
       clipAId,
       clipBId,
-      type: transitionType, // 'dissolve', 'fade', 'wipe', etc.
-      duration: duration, // transition duration in seconds
+      type: transitionType,
+      duration: actualDuration,
+      settings: get().buildTransitionSettings(transitionType),
+      // Store original positions for removal
+      editPoint: editPoint,
+      originalClipAEnd: clipA.startTime + clipA.duration,
+      originalClipATrimEnd: clipA.trimEnd,
+      originalClipBStart: clipB.startTime,
+      originalClipBTrimStart: clipB.trimStart,
+    }
+    
+    // Modify clips to create overlap:
+    // ClipA extends by halfDuration (into clipB's original time)
+    // ClipB starts halfDuration earlier (into clipA's original time)
+    set((state) => ({
+      clips: state.clips.map(c => {
+        if (c.id === clipAId) {
+          // Extend clipA's duration and trimEnd
+          return {
+            ...c,
+            duration: c.duration + halfDuration,
+            trimEnd: (c.trimEnd || c.duration) + halfDuration
+          }
+        }
+        if (c.id === clipBId) {
+          // Start clipB earlier and adjust trimStart
+          return {
+            ...c,
+            startTime: c.startTime - halfDuration,
+            duration: c.duration + halfDuration,
+            trimStart: Math.max(0, (c.trimStart || 0) - halfDuration)
+          }
+        }
+        return c
+      }),
+      transitions: [...state.transitions, newTransition],
+      transitionCounter: state.transitionCounter + 1
+    }))
+    
+    return newTransition
+  },
+
+  /**
+   * Add a transition to a single clip edge (in/out)
+   * This does not modify clip duration, it just applies an effect at the edge.
+   */
+  addEdgeTransition: (clipId, edge = 'in', transitionType = 'fade-black', duration = 0.5) => {
+    const state = get()
+    const clip = state.clips.find(c => c.id === clipId)
+    if (!clip) return null
+    
+    // Only one edge transition per clip+edge
+    const existing = state.transitions.find(
+      t => t.kind === 'edge' && t.clipId === clipId && t.edge === edge
+    )
+    if (existing) return existing
+    
+    const maxDuration = get().getMaxEdgeTransitionDuration(clipId)
+    if (maxDuration < 0.1) return null
+    
+    const actualDuration = Math.min(duration, maxDuration)
+    
+    // Save to history before modifying
+    get().saveToHistory()
+    
+    const newTransition = {
+      id: `transition-${state.transitionCounter}`,
+      kind: 'edge',
+      clipId,
+      edge,
+      type: transitionType,
+      duration: actualDuration,
+      settings: get().buildTransitionSettings(transitionType),
     }
     
     set((state) => ({
@@ -1444,24 +1739,151 @@ export const useTimelineStore = create(
   },
 
   /**
-   * Remove a transition
+   * Remove a transition and restore clips to their original positions
    */
   removeTransition: (transitionId) => {
+    const state = get()
+    const transition = state.transitions.find(t => t.id === transitionId)
+    
+    if (!transition) return
+    
     // Save to history before modifying
     get().saveToHistory()
+
+    // Edge transitions don't modify clips
+    if (transition.kind === 'edge') {
+      set((state) => ({
+        transitions: state.transitions.filter(t => t.id !== transitionId)
+      }))
+      return
+    }
     
+    // Restore clips to their original positions (between transitions)
     set((state) => ({
+      clips: state.clips.map(c => {
+        if (c.id === transition.clipAId && transition.originalClipATrimEnd !== undefined) {
+          const newDuration = transition.originalClipAEnd - c.startTime
+          return {
+            ...c,
+            duration: newDuration,
+            trimEnd: transition.originalClipATrimEnd
+          }
+        }
+        if (c.id === transition.clipBId && transition.originalClipBStart !== undefined) {
+          const durationDiff = c.startTime - transition.originalClipBStart
+          return {
+            ...c,
+            startTime: transition.originalClipBStart,
+            duration: c.duration - durationDiff,
+            trimStart: transition.originalClipBTrimStart
+          }
+        }
+        return c
+      }),
       transitions: state.transitions.filter(t => t.id !== transitionId)
     }))
   },
 
   /**
-   * Update transition duration
+   * Update transition duration (adjusts clip overlap accordingly)
    */
   updateTransition: (transitionId, updates) => {
+    const state = get()
+    const transition = state.transitions.find(t => t.id === transitionId)
+    
+    if (!transition || updates.duration === undefined) {
+      set((state) => ({
+        transitions: state.transitions.map(t =>
+          t.id === transitionId
+            ? {
+                ...t,
+                ...updates,
+                settings: updates.settings
+                  ? get().buildTransitionSettings(updates.type || t.type, {
+                      ...(t.settings || {}),
+                      ...updates.settings
+                    })
+                  : t.settings
+              }
+            : t
+        )
+      }))
+      return
+    }
+
+    // Edge transitions just update duration (clamped)
+    if (transition.kind === 'edge') {
+      const maxDuration = get().getMaxEdgeTransitionDuration(transition.clipId)
+      const actualNewDuration = Math.min(updates.duration, maxDuration)
+      
+      get().saveToHistory()
+      set((state) => ({
+        transitions: state.transitions.map(t =>
+          t.id === transitionId
+            ? {
+                ...t,
+                ...updates,
+                duration: actualNewDuration,
+                settings: updates.settings
+                  ? get().buildTransitionSettings(updates.type || t.type, {
+                      ...(t.settings || {}),
+                      ...updates.settings
+                    })
+                  : t.settings
+              }
+            : t
+        )
+      }))
+      return
+    }
+    
+    // If duration is changing, we need to adjust the clip overlap
+    const newDuration = updates.duration
+    const oldDuration = transition.duration
+    const durationDiff = newDuration - oldDuration
+    const halfDiff = durationDiff / 2
+    
+    // Validate new duration against available handles
+    const maxDuration = get().getMaxTransitionDuration(transition.clipAId, transition.clipBId)
+    const actualNewDuration = Math.min(newDuration, maxDuration + oldDuration)
+    const actualHalfDiff = (actualNewDuration - oldDuration) / 2
+    
+    // Save to history
+    get().saveToHistory()
+    
     set((state) => ({
+      clips: state.clips.map(c => {
+        if (c.id === transition.clipAId) {
+          return {
+            ...c,
+            duration: c.duration + actualHalfDiff,
+            trimEnd: (c.trimEnd || c.duration) + actualHalfDiff
+          }
+        }
+        if (c.id === transition.clipBId) {
+          return {
+            ...c,
+            startTime: c.startTime - actualHalfDiff,
+            duration: c.duration + actualHalfDiff,
+            trimStart: Math.max(0, (c.trimStart || 0) - actualHalfDiff)
+          }
+        }
+        return c
+      }),
       transitions: state.transitions.map(t =>
-        t.id === transitionId ? { ...t, ...updates } : t
+        t.id === transitionId
+          ? {
+              ...t,
+              ...updates,
+              duration: actualNewDuration,
+              settings: updates.settings
+                ? get().buildTransitionSettings(updates.type || t.type, {
+                    ...(t.settings || {}),
+                    ...updates.settings
+                  })
+                : t.settings
+            }
+          : t
       )
     }))
   },
@@ -1495,13 +1917,16 @@ export const useTimelineStore = create(
     for (const track of state.tracks) {
       if (!track.visible || track.muted) continue
       
-      const clip = state.clips.find(c =>
+      const trackClips = state.clips.filter(c =>
         c.trackId === track.id &&
         time >= c.startTime &&
         time < c.startTime + c.duration
       )
-      if (clip) {
-        activeClips.push({ clip, track })
+      if (trackClips.length > 0) {
+        // Keep deterministic order (earlier clips first)
+        trackClips
+          .sort((a, b) => a.startTime - b.startTime)
+          .forEach(clip => activeClips.push({ clip, track }))
       }
     }
     return activeClips
@@ -1509,23 +1934,59 @@ export const useTimelineStore = create(
 
   /**
    * Get transition info at a specific time (if in transition zone)
+   * With the new overlap model:
+   * - ClipA and ClipB now overlap for transition.duration
+   * - The overlap zone IS the transition zone
+   * - transitionStart = clipB.startTime (which is now earlier than original edit point)
+   * - transitionEnd = clipA.startTime + clipA.duration (which is now later than original edit point)
    */
   getTransitionAtTime: (time) => {
     const state = get()
     
     for (const transition of state.transitions) {
+      if (transition.kind === 'edge') {
+        const clip = state.clips.find(c => c.id === transition.clipId)
+        if (!clip) continue
+        
+        const duration = Math.min(transition.duration, clip.duration)
+        if (duration <= 0) continue
+        
+        if (transition.edge === 'in') {
+          const start = clip.startTime
+          const end = start + duration
+          if (time >= start && time < end) {
+            const progress = (time - start) / duration
+            return { transition, clip, edge: 'in', progress }
+          }
+        } else {
+          const end = clip.startTime + clip.duration
+          const start = end - duration
+          if (time >= start && time < end) {
+            const progress = (time - start) / duration
+            return { transition, clip, edge: 'out', progress }
+          }
+        }
+        
+        continue
+      }
+      
       const clipA = state.clips.find(c => c.id === transition.clipAId)
       const clipB = state.clips.find(c => c.id === transition.clipBId)
       
       if (!clipA || !clipB) continue
       
-      // Transition happens at the overlap point
+      // With overlap model:
+      // - ClipB.startTime is where the transition starts
+      // - ClipA.startTime + ClipA.duration is where the transition ends
+      // Both clips are visible during this overlap period
       const transitionStart = clipB.startTime
-      const transitionEnd = transitionStart + transition.duration
+      const clipAEnd = clipA.startTime + clipA.duration
       
-      if (time >= transitionStart && time < transitionEnd) {
+      // The overlap zone is where both clips exist simultaneously
+      if (time >= transitionStart && time < clipAEnd) {
+        // Progress goes from 0 (start of clipB) to 1 (end of clipA overlap)
         const progress = (time - transitionStart) / transition.duration
-        return { transition, clipA, clipB, progress }
+        return { transition, clipA, clipB, progress: Math.min(1, Math.max(0, progress)) }
       }
     }
     return null

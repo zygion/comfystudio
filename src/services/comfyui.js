@@ -216,11 +216,14 @@ class ComfyUIService {
   }
 
   /**
-   * Get the history/output for a prompt
+   * Get history/output for a prompt (or full history if no promptId)
    */
   async getHistory(promptId) {
     try {
-      const response = await fetch(`${COMFYUI_HTTP}/history/${promptId}`);
+      const url = promptId
+        ? `${COMFYUI_HTTP}/history/${promptId}`
+        : `${COMFYUI_HTTP}/history`;
+      const response = await fetch(url);
       return await response.json();
     } catch (error) {
       console.error('Error getting history:', error);

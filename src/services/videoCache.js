@@ -207,17 +207,27 @@ class VideoCache {
 
     // Calculate the time within the source video
     const sourceTime = (clip.trimStart || 0) + (timelineTime - clip.startTime)
+    const timeDiff = Math.abs(video.currentTime - sourceTime)
     
-    // Only seek if significantly different (avoid micro-seeks that cause stuttering)
-    if (Math.abs(video.currentTime - sourceTime) > 0.1) {
-      video.currentTime = sourceTime
-    }
-
-    // Sync play/pause state
-    if (isPlaying && video.paused && cached.ready) {
-      video.play().catch(() => {})
-    } else if (!isPlaying && !video.paused) {
-      video.pause()
+    // Use different thresholds for playing vs paused
+    if (isPlaying) {
+      // When playing: Only seek on large drifts (0.15s) to avoid stuttering
+      if (timeDiff > 0.15) {
+        video.currentTime = sourceTime
+      }
+      // Start playing if needed
+      if (video.paused && cached.ready) {
+        video.play().catch(() => {})
+      }
+    } else {
+      // When paused: Use tight threshold (0.02s) for precise scrubbing
+      if (timeDiff > 0.02) {
+        video.currentTime = sourceTime
+      }
+      // Ensure paused
+      if (!video.paused) {
+        video.pause()
+      }
     }
 
     return video

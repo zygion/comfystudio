@@ -1,9 +1,10 @@
-import { Layers, Sparkles, FolderOpen, Workflow, Settings } from 'lucide-react'
+import { Layers, Sparkles, FolderOpen, Workflow, Settings, SlidersHorizontal } from 'lucide-react'
 
 function BottomTabs({ activeTab, onTabChange }) {
   const tabs = [
     { id: 'scenes', label: 'Scenes', icon: Layers },
     { id: 'generate', label: 'Generate', icon: Sparkles },
+    { id: 'effects', label: 'Effects', icon: SlidersHorizontal },
     { id: 'assets', label: 'Assets', icon: FolderOpen },
     { id: 'workflows', label: 'Workflows', icon: Workflow },
     { id: 'settings', label: 'Settings', icon: Settings },

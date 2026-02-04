@@ -690,5 +690,226 @@ clip.effects = [
 }
 ```
 
+### Session Updates (Feb 3, 2026 - Render Cache System)
+
+**Render Cache for Effect Playback:**
+When clips have effects (like masks), real-time compositing can cause desync. The render cache pre-renders clips to ensure smooth playback.
+
+**How It Works:**
+1. Select a clip with mask effects applied
+2. In Inspector panel → Effects section, click "Render Cache"
+3. System renders each frame with effects baked in
+4. Cached video plays back smoothly without desync
+5. Cache auto-invalidates when effects change (yellow "outdated" indicator)
+
+**Cache File Storage:**
+```
+MyProject/
+├── project.storyflow
+├── assets/
+├── cache/                          # NEW - Render cache folder
+│   ├── clip-123_1234567890.webm   # Cached video with effects
+│   └── clip-123_1234567890.meta.json  # Cache metadata
+└── renders/
+```
+
+**New Files:**
+- `src/services/renderCache.js` - Frame-by-frame rendering engine
+
+**Modified Files:**
+| File | Changes |
+|------|---------|
+| `src/services/fileSystem.js` | Added `saveRenderCache()`, `loadRenderCache()`, `listRenderCaches()`, `deleteRenderCache()`, `clearClipRenderCaches()` |
+| `src/stores/timelineStore.js` | Added `cacheStatus`, `cacheProgress`, `cacheUrl`, `cachePath` to clips; `setCacheStatus()`, `setCacheUrl()`, `invalidateCache()`, `clearClipCache()` |
+| `src/components/InspectorPanel.jsx` | Added render cache UI with progress bar, render/clear buttons, status indicators |
+| `src/components/VideoLayerRenderer.jsx` | Uses cached URL when available, skips CSS masks for cached clips |
+| `src/components/Timeline.jsx` | Cache status badges on clips (⚡=effects, ✓=cached, ⚠=outdated, 🔄=rendering) |
+| `src/components/PreviewPanel.jsx` | Added `MaskPreview` component for frame-by-frame mask playback |
+
+**Clip Cache Data Structure:**
+```javascript
+clip: {
+  // ... existing fields ...
+  effects: [...],
+  cacheStatus: 'none' | 'rendering' | 'cached' | 'outdated',
+  cacheProgress: 0-100,
+  cacheUrl: 'blob:...',     // In-memory blob URL for playback
+  cachePath: 'cache/clip-123_xxx.webm',  // Path on disk for persistence
+}
+```
+
+**Render Cache Service (`renderCache.js`):**
+- Two-phase rendering: 1) Extract all frames with masks applied, 2) Encode to WebM
+- Uses `canvas.captureStream(0)` + `MediaRecorder` for encoding
+- Pixel-level mask compositing (mask luminance → alpha channel)
+- VP9 codec with alpha channel support (`vp09.00.10.08`)
+- `requestAnimationFrame` for precise frame timing during encoding
+- Progress callbacks for UI updates
+- Cancellation support
+
+**File System Cache Functions:**
+```javascript
+// Save cache to disk
+saveRenderCache(projectDir, clipId, blob, metadata) → 'cache/clip-xxx.webm'
+
+// Load cache from disk  
+loadRenderCache(projectDir, relativePath) → { url, metadata }
+
+// List all caches
+listRenderCaches(projectDir) → [{ clipId, path, metadata }]
+
+// Delete cache
+deleteRenderCache(projectDir, relativePath)
+
+// Clear all caches for a clip
+clearClipRenderCaches(projectDir, clipId)
+```
+
+**Inspector Cache UI:**
+- Shows current cache status with icon
+- Progress bar during rendering
+- Buttons: "Render Cache", "Re-render" (if outdated), "Clear Cache", "Cancel"
+- Automatically clears cache when effects are modified
+
+**Video Playback Improvements:**
+- Reduced seek threshold from 0.08s to 0.02s for frame-accurate stepping
+- Mask preview component with frame-by-frame playback
+- Fixed infinite render loop when selecting masks
+
+### Session Updates (Feb 4, 2026)
+
+**Render Cache Disk Loading Fix:**
+- Fixed issue where cached clips would not play from disk cache after page refresh
+- Problem: Blob URLs stored in `cacheUrl` become invalid after page refresh
+- Solution: Added `useDiskCacheLoader` hook that detects clips with `cachePath` but stale `cacheUrl`
+- On detection, automatically loads the cached WebM file from disk using `loadRenderCache()`
+- Creates a new valid blob URL and updates the clip's `cacheUrl` in the store
+- Added `diskCacheUrls` map to track which URLs have been loaded this session
+- Added `clearDiskCacheUrl()` export to properly cleanup when cache is cleared
+- Files: `src/components/VideoLayerRenderer.jsx`, `src/components/InspectorPanel.jsx`
+
+
+
+
+### Electron Migration (Feb 4, 2026)
+
+Converted the web app to an Electron desktop application with native file system access.
+
+**Why Electron:**
+- Native file paths instead of blob URLs (no more stale URL issues after refresh)
+- No browser sandbox limitations
+- Future: Native FFmpeg for frame-accurate encoding
+- Future: Hardware-accelerated encoding (NVENC, QuickSync)
+
+**Architecture:**
+```
+┌─────────────────────────────────────────────────┐
+│ Renderer Process (React App)                     │
+│  ├── fileSystem.js → window.electronAPI          │
+│  └── Components → fileSystem.js                  │
+├─────────────────────────────────────────────────┤
+│ Preload Script (contextBridge)                   │
+│  └── Exposes electronAPI to renderer             │
+├─────────────────────────────────────────────────┤
+│ Main Process (Node.js)                           │
+│  ├── IPC handlers for file operations            │
+│  ├── Electron dialog API                         │
+│  └── Node.js fs module                           │
+└─────────────────────────────────────────────────┘
+```
+
+**New/Modified Files:**
+
+| File | Changes |
+|------|---------|
+| `electron/main.js` | Expanded with 20+ IPC handlers for file ops, dialog, settings |
+| `electron/preload.js` | Exposes `window.electronAPI` with all file system methods |
+| `src/services/fileSystem.js` | Dual-mode: Electron (IPC) vs Web (File System Access API) |
+| `src/stores/projectStore.js` | Supports string paths (Electron) and handles (Web) |
+| `src/components/WelcomeScreen.jsx` | Updated to use `openRecentProject()` for both modes |
+| `package.json` | Added electron-builder config, new scripts |
+| `vite.config.js` | Configured for Electron compatibility |
+
+**Running the App:**
+```bash
+# Development (hot reload)
+npm run electron:dev
+
+# Build for distribution
+npm run electron:build        # All platforms
+npm run electron:build:win    # Windows only
+npm run electron:build:mac    # macOS only
+npm run electron:build:linux  # Linux only
+```
+
+**IPC API (window.electronAPI):**
+- `selectDirectory(options)` - Native folder picker
+- `selectFile(options)` - Native file picker
+- `exists(path)` - Check if file/folder exists
+- `createDirectory(path)` - Create folders
+- `readFile(path, options)` - Read files
+- `writeFile(path, data, options)` - Write files
+- `deleteFile(path)` - Delete files
+- `copyFile(src, dest)` - Copy files
+- `listDirectory(path)` - List folder contents
+- `pathJoin(...parts)` - Join path segments
+- `getAppPath(name)` - Get special paths (documents, userData, etc.)
+- `getFileUrlDirect(path)` - Get file:// URL for media playback
+- `getSetting(key)` / `setSetting(key, value)` - Persistent settings
+
+**File URL Handling:**
+- Web mode: Uses `URL.createObjectURL()` with blob URLs
+- Electron mode: Uses `file://` protocol URLs directly
+- Video/audio elements work natively with file:// URLs in Electron
+
+**What Stays the Same:**
+- All React components and UI
+- Zustand stores (timeline, assets, project)
+- Timeline/preview/inspector logic
+- ComfyUI integration
+- Keyframe animation system
+- Transform/crop/effects system
+
+### Thumbnail Sprites for Fast Scrubbing (Feb 4, 2026)
+
+Added filmstrip-style thumbnail sprite generation for instant scrubbing performance.
+
+**How It Works:**
+1. When a video is imported, thumbnail sprites are auto-generated in background
+2. Sprites contain ~60 frames extracted from the video at regular intervals
+3. Sprites are saved to `project/thumbnails/` folder as JPEG files
+4. During scrubbing, sprite frames are displayed instead of seeking the video
+5. When scrubbing stops, the precise video frame is shown
+
+**Project Folder Structure Update:**
+```
+MyProject/
+├── project.storyflow
+├── assets/
+├── cache/
+├── thumbnails/              # NEW - Sprite storage
+│   ├── asset123_sprite.jpg  # Sprite image (filmstrip)
+│   └── asset123_sprite.json # Metadata (frame positions)
+└── renders/
+```
+
+**New Files:**
+- `src/services/thumbnailSprites.js` - Sprite generation and loading
+
+**Modified Files:**
+- `src/stores/assetsStore.js` - Added `generateAssetSprite()`, `loadSpritesFromProject()`, `updateAssetSprite()`
+- `src/components/VideoLayerRenderer.jsx` - Shows sprite during scrubbing, hides video
+- `src/components/panels/AssetsPanel.jsx` - "Generate Thumbnails" context menu, auto-generation on import
+
+**Asset Panel Indicators:**
+- Blue filmstrip icon: Thumbnails are ready
+- Spinning loader: Thumbnails being generated
+- Right-click video → "Generate Thumbnails" to manually regenerate
+
+**Scrubbing Performance:**
+- Without sprites: Video decoding on each scrub (sluggish)
+- With sprites: Instant CSS background-position change (smooth)
+- Sprite visible during scrub, video shown when stopped
+
 ---
 *Backup of previous version: `backUP01_PROJECT_SUMMARY.md`*

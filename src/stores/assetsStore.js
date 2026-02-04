@@ -354,6 +354,123 @@ export const useAssetsStore = create(
   },
 
   /**
+   * Update asset's sprite data
+   * @param {string} assetId - The asset ID
+   * @param {object} spriteData - Sprite metadata { spriteUrl, spritePath, ... }
+   */
+  updateAssetSprite: (assetId, spriteData) => {
+    set((state) => ({
+      assets: state.assets.map(a => 
+        a.id === assetId ? { ...a, sprite: spriteData } : a
+      ),
+      currentPreview: state.currentPreview?.id === assetId 
+        ? { ...state.currentPreview, sprite: spriteData }
+        : state.currentPreview
+    }))
+  },
+
+  /**
+   * Get sprite data for an asset
+   * @param {string} assetId - The asset ID
+   * @returns {object|null} - Sprite data or null
+   */
+  getAssetSprite: (assetId) => {
+    const asset = get().assets.find(a => a.id === assetId)
+    return asset?.sprite || null
+  },
+
+  /**
+   * Generate thumbnail sprite for a video asset
+   * @param {string} assetId - The asset ID
+   * @param {string} projectPath - Project directory path (for saving)
+   */
+  generateAssetSprite: async (assetId, projectPath) => {
+    const asset = get().assets.find(a => a.id === assetId)
+    if (!asset || asset.type !== 'video' || !asset.url) {
+      console.warn('Cannot generate sprite: invalid asset or not a video')
+      return null
+    }
+
+    // Mark as generating
+    set((state) => ({
+      assets: state.assets.map(a => 
+        a.id === assetId ? { ...a, spriteGenerating: true } : a
+      )
+    }))
+
+    try {
+      const { generateThumbnailSprite, saveSpriteToProject } = await import('../services/thumbnailSprites')
+      
+      // Generate sprite
+      const result = await generateThumbnailSprite(asset.url, asset.duration || 5)
+      if (!result) {
+        throw new Error('Failed to generate sprite')
+      }
+
+      let spriteData = result.spriteData
+
+      // Save to project if we have a project path
+      if (projectPath) {
+        const saved = await saveSpriteToProject(projectPath, assetId, result.blob, result.spriteData)
+        spriteData = {
+          ...spriteData,
+          spritePath: saved.spritePath,
+          url: result.spriteUrl, // Keep blob URL for immediate use
+        }
+      }
+
+      // Update asset with sprite data
+      get().updateAssetSprite(assetId, spriteData)
+      
+      // Clear generating flag
+      set((state) => ({
+        assets: state.assets.map(a => 
+          a.id === assetId ? { ...a, spriteGenerating: false } : a
+        )
+      }))
+
+      console.log(`Generated sprite for ${asset.name}: ${spriteData.frameCount} frames`)
+      return spriteData
+    } catch (err) {
+      console.error('Failed to generate sprite:', err)
+      
+      // Clear generating flag
+      set((state) => ({
+        assets: state.assets.map(a => 
+          a.id === assetId ? { ...a, spriteGenerating: false } : a
+        )
+      }))
+      
+      return null
+    }
+  },
+
+  /**
+   * Load sprites for all video assets from project
+   * @param {string} projectPath - Project directory path
+   */
+  loadSpritesFromProject: async (projectPath) => {
+    if (!projectPath) return
+
+    const { loadSpriteFromProject } = await import('../services/thumbnailSprites')
+    const state = get()
+    
+    const videoAssets = state.assets.filter(a => a.type === 'video')
+    
+    for (const asset of videoAssets) {
+      try {
+        const sprite = await loadSpriteFromProject(projectPath, asset.id)
+        if (sprite) {
+          get().updateAssetSprite(asset.id, sprite.spriteData)
+          console.log(`Loaded sprite for ${asset.name}`)
+        }
+      } catch (err) {
+        // Sprite might not exist yet, that's OK
+      }
+    }
+  },
+
+  /**
    * Get asset by ID
    * @param {string} assetId - The asset ID to find
    * @returns {Object|null} - The asset or null if not found

@@ -1,9 +1,9 @@
-import { Upload, FolderOpen, Image, Video, Music, Search, Grid, List, Trash2, Edit3, Play, FileVideo, FileAudio, FileImage, Loader2, FolderPlus, ChevronRight, ChevronLeft, Home, Minus, Plus, MoreVertical, FolderInput, Wand2, Layers } from 'lucide-react'
+import { Upload, FolderOpen, Image, Video, Music, Search, Grid, List, Trash2, Edit3, Play, FileVideo, FileAudio, FileImage, Loader2, FolderPlus, ChevronRight, ChevronLeft, Home, Minus, Plus, MoreVertical, FolderInput, Wand2, Layers, Film } from 'lucide-react'
 import { useState, useRef, useEffect } from 'react'
 import useAssetsStore from '../../stores/assetsStore'
 import useProjectStore from '../../stores/projectStore'
 import useTimelineStore from '../../stores/timelineStore'
-import { importAsset } from '../../services/fileSystem'
+import { importAsset, isElectron } from '../../services/fileSystem'
 import MaskGenerationDialog from '../MaskGenerationDialog'
 
 // Thumbnail size presets
@@ -45,7 +45,9 @@ function AssetsPanel() {
     addFolder,
     removeFolder,
     renameFolder,
-    moveAssetToFolder
+    moveAssetToFolder,
+    generateAssetSprite,
+    getAssetSprite,
   } = useAssetsStore()
   const { currentProjectHandle } = useProjectStore()
   const { isPlaying: timelineIsPlaying, togglePlay: timelineTogglePlay } = useTimelineStore()
@@ -96,7 +98,7 @@ function AssetsPanel() {
         const assetInfo = await importAsset(currentProjectHandle, file, category)
         
         // Add to assets store with URL for playback
-        addAsset({
+        const newAsset = addAsset({
           ...assetInfo,
           url: URL.createObjectURL(file),
           folderId: currentFolderId, // Add to current folder
@@ -104,6 +106,15 @@ function AssetsPanel() {
             duration: assetInfo.duration,
           },
         })
+        
+        // Auto-generate thumbnail sprites for videos in background
+        if (category === 'video' && assetInfo.duration > 0.5 && newAsset) {
+          const projectPath = typeof currentProjectHandle === 'string' ? currentProjectHandle : null
+          // Generate sprites asynchronously (don't await)
+          generateAssetSprite(newAsset.id, projectPath).catch(err => {
+            console.warn('Auto-sprite generation failed:', err)
+          })
+        }
       } catch (err) {
         console.error(`Error importing ${file.name}:`, err)
       }
@@ -204,6 +215,27 @@ function AssetsPanel() {
     if (asset && canGenerateMask(asset)) {
       setMaskDialogAsset(asset)
       setContextMenu(null)
+    }
+  }
+  
+  // Check if asset can have thumbnails generated (videos only)
+  const canGenerateThumbnails = (asset) => {
+    return asset.type === 'video' && asset.duration > 0.5
+  }
+  
+  // Handle generating thumbnail sprite
+  const handleGenerateThumbnails = async (assetId) => {
+    setContextMenu(null)
+    const asset = assets.find(a => a.id === assetId)
+    if (!asset || !canGenerateThumbnails(asset)) return
+    
+    // Get project path for saving sprites
+    const projectPath = typeof currentProjectHandle === 'string' ? currentProjectHandle : null
+    
+    try {
+      await generateAssetSprite(assetId, projectPath)
+    } catch (err) {
+      console.error('Failed to generate thumbnails:', err)
     }
   }
 
@@ -583,6 +615,20 @@ function AssetsPanel() {
                       {asset.type === 'mask' ? 'MASK' : asset.isImported ? 'IMP' : 'AI'}
                     </div>
                     
+                    {/* Sprite badge - shows if thumbnails are ready */}
+                    {asset.type === 'video' && asset.sprite?.url && (
+                      <div className={`absolute bottom-0.5 left-0.5 px-1 py-0.5 rounded ${sizeConfig.badgeSize} text-white font-medium bg-sf-blue/90`} title="Thumbnails ready for fast scrubbing">
+                        <Film className="w-2 h-2 inline-block" />
+                      </div>
+                    )}
+                    
+                    {/* Generating indicator */}
+                    {asset.spriteGenerating && (
+                      <div className="absolute bottom-0.5 left-0.5 px-1 py-0.5 rounded bg-sf-dark-800/90">
+                        <Loader2 className={`w-2 h-2 text-sf-blue animate-spin`} />
+                      </div>
+                    )}
+                    
                     {/* Play overlay on hover */}
                     <div className="absolute inset-0 bg-black/50 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                       <Play className={`${sizeConfig.playSize} text-white`} />
@@ -759,12 +805,36 @@ function AssetsPanel() {
           style={{ left: contextMenu.x, top: contextMenu.y }}
           onClick={(e) => e.stopPropagation()}
         >
-          {/* Create Mask option - only for video/image */}
+          {/* Video/Image specific options */}
           {(() => {
             const asset = assets.find(a => a.id === contextMenu.assetId)
-            if (asset && canGenerateMask(asset)) {
-              return (
-                <>
+            const showMask = asset && canGenerateMask(asset)
+            const showThumbnails = asset && canGenerateThumbnails(asset)
+            const hasSprite = asset?.sprite?.url
+            const isGenerating = asset?.spriteGenerating
+            
+            if (!showMask && !showThumbnails) return null
+            
+            return (
+              <>
+                {/* Generate Thumbnails - videos only */}
+                {showThumbnails && (
+                  <button
+                    onClick={() => handleGenerateThumbnails(contextMenu.assetId)}
+                    disabled={isGenerating}
+                    className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {isGenerating ? (
+                      <Loader2 className="w-3 h-3 text-sf-accent animate-spin" />
+                    ) : (
+                      <Film className="w-3 h-3 text-sf-blue" />
+                    )}
+                    {isGenerating ? 'Generating...' : hasSprite ? 'Regenerate Thumbnails' : 'Generate Thumbnails'}
+                  </button>
+                )}
+                
+                {/* Create Mask option */}
+                {showMask && (
                   <button
                     onClick={() => handleOpenMaskDialog(contextMenu.assetId)}
                     className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
@@ -772,11 +842,11 @@ function AssetsPanel() {
                     <Wand2 className="w-3 h-3 text-sf-accent" />
                     Create Mask...
                   </button>
-                  <div className="border-t border-sf-dark-600 my-1" />
-                </>
-              )
-            }
-            return null
+                )}
+                
+                <div className="border-t border-sf-dark-600 my-1" />
+              </>
+            )
           })()}
           
           <div className="px-3 py-1 text-[10px] text-sf-text-muted uppercase tracking-wider">

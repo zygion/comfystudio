@@ -529,6 +529,62 @@ export function useComfyUI() {
       // Step 6: Set up a custom polling for mask results
       // The mask workflow outputs to node 5 (SaveImage)
       let pollingStopped = false;
+
+      const buildMaskResultFromImages = (images) => {
+        if (!images || images.length === 0) return null;
+        const firstImage = images[0];
+        const maskUrl = comfyui.getMediaUrl(
+          firstImage.filename,
+          firstImage.subfolder || '',
+          firstImage.type || 'output'
+        );
+
+        return {
+          sourceAssetId: asset.id,
+          url: maskUrl,
+          frameCount: images.length,
+          width: asset.settings?.width,
+          height: asset.settings?.height,
+          maskFrames: images.map(img => ({
+            filename: img.filename,
+            url: comfyui.getMediaUrl(img.filename, img.subfolder || '', img.type || 'output'),
+            subfolder: img.subfolder,
+          })),
+        };
+      };
+
+      const extractImagesFromOutputs = (outputs) => {
+        if (!outputs || Object.keys(outputs).length === 0) return null;
+        if (outputs['5']?.images && outputs['5'].images.length > 0) {
+          return outputs['5'].images;
+        }
+        for (const nodeId of Object.keys(outputs)) {
+          const nodeOutput = outputs[nodeId];
+          if (nodeOutput?.images && nodeOutput.images.length > 0) {
+            return nodeOutput.images;
+          }
+        }
+        return null;
+      };
+
+      const tryResolveFromFullHistory = async () => {
+        try {
+          const history = await comfyui.getHistory();
+          const promptKeys = Object.keys(history || {});
+          for (const key of promptKeys) {
+            const promptHistory = history[key];
+            const images = extractImagesFromOutputs(promptHistory?.outputs);
+            if (!images || images.length === 0) continue;
+            const matching = images.filter(img => img.filename?.startsWith(outputPrefix));
+            if (matching.length > 0) {
+              return matching;
+            }
+          }
+        } catch (err) {
+          console.warn('Failed to resolve mask from full history:', err);
+        }
+        return null;
+      };
       
       const pollMaskCompletion = async () => {
         if (pollingStopped) return true;
@@ -553,57 +609,17 @@ export function useComfyUI() {
               console.log('Mask generation complete, outputs:', outputs);
               console.log('Available output nodes:', Object.keys(outputs));
               
-              // Find mask images - try node 5 (SaveImage) first, then check other nodes
-              let images = null;
-              
-              if (outputs['5']?.images && outputs['5'].images.length > 0) {
-                images = outputs['5'].images;
-                console.log('Found mask images in node 5:', images);
-              } else {
-                // Check all nodes for images output
-                for (const nodeId of Object.keys(outputs)) {
-                  const nodeOutput = outputs[nodeId];
-                  if (nodeOutput?.images && nodeOutput.images.length > 0) {
-                    images = nodeOutput.images;
-                    console.log(`Found mask images in node ${nodeId}:`, images);
-                    break;
-                  }
-                }
-              }
-              
+              const images = extractImagesFromOutputs(outputs);
               if (images && images.length > 0) {
-                // For video masks, we get multiple frames
-                // For image masks, we get a single image
-                const firstImage = images[0];
-                const maskUrl = comfyui.getMediaUrl(
-                  firstImage.filename,
-                  firstImage.subfolder || '',
-                  firstImage.type || 'output'
-                );
-                
-                // Build mask result
-                const result = {
-                  sourceAssetId: asset.id,
-                  url: maskUrl,
-                  frameCount: images.length,
-                  width: asset.settings?.width,
-                  height: asset.settings?.height,
-                  maskFrames: images.map(img => ({
-                    filename: img.filename,
-                    url: comfyui.getMediaUrl(img.filename, img.subfolder || '', img.type || 'output'),
-                    subfolder: img.subfolder,
-                  })),
-                };
-                
-                console.log('Setting mask result:', result);
-                pollingStopped = true;
-                
-                // Set state in a controlled way
-                setProgress({ value: 100, max: 100, percent: 100 });
-                setIsGenerating(false);
-                setMaskResult(result);
-                
-                return true; // Stop polling
+                const result = buildMaskResultFromImages(images);
+                if (result) {
+                  console.log('Setting mask result:', result);
+                  pollingStopped = true;
+                  setProgress({ value: 100, max: 100, percent: 100 });
+                  setIsGenerating(false);
+                  setMaskResult(result);
+                  return true; // Stop polling
+                }
               } else {
                 console.log('Outputs found but no images yet, continuing to poll...');
               }
@@ -633,8 +649,21 @@ export function useComfyUI() {
           console.warn('Mask generation timed out after 5 minutes');
           clearInterval(maskPollInterval);
           pollingStopped = true;
-          setError('Mask generation timed out');
-          setIsGenerating(false);
+          // Try to recover by scanning full history for our output prefix
+          (async () => {
+            const recoveredImages = await tryResolveFromFullHistory();
+            if (recoveredImages && recoveredImages.length > 0) {
+              const result = buildMaskResultFromImages(recoveredImages);
+              if (result) {
+                setProgress({ value: 100, max: 100, percent: 100 });
+                setIsGenerating(false);
+                setMaskResult(result);
+                return;
+              }
+            }
+            setError('Mask generation timed out');
+            setIsGenerating(false);
+          })();
         }
       }, 5 * 60 * 1000);
 

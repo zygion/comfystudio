@@ -3,12 +3,13 @@ import {
   Volume2, VolumeX, Lock, Unlock, Eye, EyeOff, 
   Plus, Music, Mic, Video, Type, Image as ImageIcon,
   Sparkles, GripVertical, Magnet, ArrowRightLeft, Square, X, Check, Pencil,
-  Undo2, Redo2, Diamond
+  Undo2, Redo2, Diamond, Zap, AlertTriangle, Loader2
 } from 'lucide-react'
 import useTimelineStore from '../stores/timelineStore'
 import useAssetsStore from '../stores/assetsStore'
 import { useSnapping, SNAP_TYPES } from '../hooks/useSnapping'
 import { getAllKeyframeTimes } from '../utils/keyframes'
+import { TRANSITION_TYPES, TRANSITION_DURATIONS, FRAME_RATE } from '../constants/transitions'
 
 function Timeline({ onOpenAudioGenerate }) {
   const timelineRef = useRef(null)
@@ -39,6 +40,9 @@ function Timeline({ onOpenAudioGenerate }) {
   // Transition type menu state
   const [transitionMenu, setTransitionMenu] = useState(null) // { x, y, clipA, clipB }
   
+  // Transition drag/drop state
+  const [transitionDropTarget, setTransitionDropTarget] = useState(null) // `${clipAId}-${clipBId}`
+  
   // Transition dragging state
   const [transitionDragState, setTransitionDragState] = useState(null) // { transitionId, startX, startDuration }
   
@@ -50,18 +54,7 @@ function Timeline({ onOpenAudioGenerate }) {
   const [panStart, setPanStart] = useState(null) // { x, y, scrollLeft, scrollTop }
   const [isSpaceHeld, setIsSpaceHeld] = useState(false)
   
-  // Available transition types
-  const TRANSITION_TYPES = [
-    { id: 'dissolve', name: 'Dissolve', icon: '⚪' },
-    { id: 'fade-black', name: 'Fade to Black', icon: '⬛' },
-    { id: 'fade-white', name: 'Fade to White', icon: '⬜' },
-    { id: 'wipe-left', name: 'Wipe Left', icon: '◀' },
-    { id: 'wipe-right', name: 'Wipe Right', icon: '▶' },
-    { id: 'wipe-up', name: 'Wipe Up', icon: '▲' },
-    { id: 'wipe-down', name: 'Wipe Down', icon: '▼' },
-    { id: 'slide-left', name: 'Slide Left', icon: '⇠' },
-    { id: 'slide-right', name: 'Slide Right', icon: '⇢' },
-  ]
+  // Transition types and durations are defined in constants/transitions
   
   // Clip context menu state
   const [clipContextMenu, setClipContextMenu] = useState(null) // { x, y, clipId }
@@ -102,6 +95,7 @@ function Timeline({ onOpenAudioGenerate }) {
     addTransition,
     removeTransition,
     updateTransition,
+    getMaxTransitionDuration,
     toggleSnapping,
     toggleRippleEdit,
     setActiveSnapTime,
@@ -114,6 +108,19 @@ function Timeline({ onOpenAudioGenerate }) {
     canRedo,
     saveToHistory
   } = useTimelineStore()
+  
+  const edgeTransitionsByClipId = useMemo(() => {
+    const map = new Map()
+    transitions
+      .filter(t => t.kind === 'edge' && t.clipId)
+      .forEach(t => {
+        if (!map.has(t.clipId)) {
+          map.set(t.clipId, [])
+        }
+        map.get(t.clipId).push(t)
+      })
+    return map
+  }, [transitions])
   
   // Snapping hook
   const { snapClipPosition, snapTrim, pixelsPerSecond: snapPixelsPerSecond } = useSnapping()
@@ -1023,12 +1030,33 @@ function Timeline({ onOpenAudioGenerate }) {
     })
   }
   
-  // Select transition type from menu
-  const handleSelectTransitionType = (type) => {
+  // Select transition type and duration from menu
+  const handleSelectTransition = (type, durationSeconds) => {
     if (transitionMenu) {
-      addTransition(transitionMenu.clipA.id, transitionMenu.clipB.id, type, 0.5)
+      const result = addTransition(transitionMenu.clipA.id, transitionMenu.clipB.id, type, durationSeconds)
+      if (!result) {
+        // Show warning if transition couldn't be added (insufficient handles)
+        console.warn('Could not add transition - insufficient handles')
+      }
       setTransitionMenu(null)
     }
+  }
+  
+  const parseTransitionDrop = (e) => {
+    const raw = e.dataTransfer.getData('application/x-storyflow-transition')
+    if (!raw) return null
+    try {
+      return JSON.parse(raw)
+    } catch {
+      return null
+    }
+  }
+  
+  // Calculate which duration options are available based on handles
+  const getAvailableDurations = () => {
+    if (!transitionMenu) return []
+    const maxDuration = getMaxTransitionDuration(transitionMenu.clipA.id, transitionMenu.clipB.id)
+    return TRANSITION_DURATIONS.filter(d => d.seconds <= maxDuration)
   }
   
   // Close transition menu when clicking outside
@@ -1149,7 +1177,8 @@ function Timeline({ onOpenAudioGenerate }) {
     )
   }
 
-  // Find adjacent clips (for showing transition buttons)
+  // Find adjacent or overlapping clips (for showing transition buttons/zones)
+  // With the overlap model, clips with transitions will overlap
   const getAdjacentClips = (trackId) => {
     const trackClips = clips
       .filter(c => c.trackId === trackId)
@@ -1159,10 +1188,16 @@ function Timeline({ onOpenAudioGenerate }) {
     for (let i = 0; i < trackClips.length - 1; i++) {
       const clipA = trackClips[i]
       const clipB = trackClips[i + 1]
-      // Check if clips are adjacent (within 0.5s)
-      const gap = clipB.startTime - (clipA.startTime + clipA.duration)
-      if (Math.abs(gap) < 0.5) {
-        pairs.push({ clipA, clipB })
+      const clipAEnd = clipA.startTime + clipA.duration
+      
+      // Check if clips are adjacent (within 0.5s gap) OR overlapping (transition exists)
+      const gap = clipB.startTime - clipAEnd
+      const isOverlapping = clipB.startTime < clipAEnd
+      
+      if (isOverlapping || Math.abs(gap) < 0.5) {
+        // Check if there's a transition between these clips
+        const transition = getTransitionBetween(clipA.id, clipB.id)
+        pairs.push({ clipA, clipB, transition, isOverlapping })
       }
     }
     return pairs
@@ -1653,6 +1688,21 @@ function Timeline({ onOpenAudioGenerate }) {
                       minWidth: '24px',
                     }}
                   >
+                    {(() => {
+                      const edgeTransitions = edgeTransitionsByClipId.get(clip.id) || []
+                      const hasIn = edgeTransitions.some(t => t.edge === 'in')
+                      const hasOut = edgeTransitions.some(t => t.edge === 'out')
+                      return (
+                        <>
+                          {hasIn && (
+                            <div className="absolute left-0 top-0 bottom-0 w-2 bg-gradient-to-r from-purple-500/50 to-transparent pointer-events-none" />
+                          )}
+                          {hasOut && (
+                            <div className="absolute right-0 top-0 bottom-0 w-2 bg-gradient-to-l from-purple-500/50 to-transparent pointer-events-none" />
+                          )}
+                        </>
+                      )
+                    })()}
                     {/* Text Clip Rendering */}
                     {isTextClip ? (
                       <>
@@ -1828,6 +1878,32 @@ function Timeline({ onOpenAudioGenerate }) {
                           </span>
                         </div>
                         
+                        {/* Effects/Cache indicator - top right area */}
+                        {(clip.effects?.length > 0) && (
+                          <div className="absolute top-1 right-8 z-10 flex items-center gap-1">
+                            {/* Effect badge */}
+                            <div className="bg-purple-500/80 rounded px-1 py-0.5 flex items-center gap-0.5" title="Has effects">
+                              <Zap className="w-2.5 h-2.5 text-white" />
+                            </div>
+                            {/* Cache status indicator */}
+                            {clip.cacheStatus === 'cached' && (
+                              <div className="bg-green-500/80 rounded px-1 py-0.5" title="Cached">
+                                <Check className="w-2.5 h-2.5 text-white" />
+                              </div>
+                            )}
+                            {clip.cacheStatus === 'invalid' && (
+                              <div className="bg-yellow-500/80 rounded px-1 py-0.5" title="Cache outdated">
+                                <AlertTriangle className="w-2.5 h-2.5 text-white" />
+                              </div>
+                            )}
+                            {clip.cacheStatus === 'rendering' && (
+                              <div className="bg-blue-500/80 rounded px-1 py-0.5 animate-pulse" title={`Rendering ${clip.cacheProgress || 0}%`}>
+                                <Loader2 className="w-2.5 h-2.5 text-white animate-spin" />
+                              </div>
+                            )}
+                          </div>
+                        )}
+                        
                         {/* Duration badge - bottom right */}
                         <div className="absolute bottom-1 right-1 px-1 py-0.5 bg-black/60 rounded text-[8px] text-white/90 font-mono">
                           {clip.duration.toFixed(1)}s
@@ -1879,30 +1955,120 @@ function Timeline({ onOpenAudioGenerate }) {
                   )
                 })}
                 
-                {/* Roll edit zones and transition buttons between adjacent clips */}
-                {getAdjacentClips(track.id).map(({ clipA, clipB }) => {
-                  const existingTransition = getTransitionBetween(clipA.id, clipB.id)
-                  const editPointX = (clipA.startTime + clipA.duration) * pixelsPerSecond
+                {/* Roll edit zones and transition buttons/overlays between adjacent clips */}
+                {getAdjacentClips(track.id).map(({ clipA, clipB, transition, isOverlapping }) => {
+                  const clipAEnd = clipA.startTime + clipA.duration
+                  
+                  if (transition && isOverlapping) {
+                    // Show transition overlay zone for overlapping clips
+                    const overlapStart = clipB.startTime
+                    const overlapEnd = clipAEnd
+                    const overlapWidth = (overlapEnd - overlapStart) * pixelsPerSecond
+                    const overlapX = overlapStart * pixelsPerSecond
+                    const centerX = overlapX + overlapWidth / 2
+                    
+                    return (
+                      <div
+                        key={`transition-${clipA.id}-${clipB.id}`}
+                        className="absolute top-0 bottom-0 z-25 pointer-events-none"
+                        style={{ left: `${overlapX}px`, width: `${overlapWidth}px` }}
+                      >
+                        {/* Transition overlap visualization - diagonal stripes */}
+                        <div 
+                          className="absolute inset-0 opacity-40"
+                          style={{
+                            background: `repeating-linear-gradient(
+                              -45deg,
+                              transparent,
+                              transparent 3px,
+                              rgba(139, 92, 246, 0.5) 3px,
+                              rgba(139, 92, 246, 0.5) 6px
+                            )`
+                          }}
+                        />
+                        
+                        {/* Edit point marker (center of transition) */}
+                        <div 
+                          className="absolute top-0 bottom-0 w-px bg-purple-400"
+                          style={{ left: `${overlapWidth / 2}px` }}
+                        />
+                        
+                        {/* Transition controls - centered on the overlap */}
+                        <div 
+                          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-auto group/trans"
+                        >
+                          {/* Transition icon button */}
+                          <button
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              removeTransition(transition.id)
+                            }}
+                            className="w-6 h-6 rounded-full bg-purple-600 flex items-center justify-center hover:bg-sf-error transition-colors shadow-lg"
+                            title={`${transition.type} (${Math.round(transition.duration * FRAME_RATE)} frames) - Click to remove`}
+                          >
+                            <span className="text-[10px] text-white">
+                              {TRANSITION_TYPES.find(t => t.id === transition.type)?.icon || '⚪'}
+                            </span>
+                          </button>
+                          
+                          {/* Duration label */}
+                          <div className="absolute -bottom-5 left-1/2 -translate-x-1/2 text-[9px] text-purple-300 whitespace-nowrap bg-sf-dark-800/80 px-1 rounded">
+                            {Math.round(transition.duration * FRAME_RATE)}f
+                          </div>
+                        </div>
+                      </div>
+                    )
+                  }
+                  
+                  // Non-overlapping adjacent clips - show add transition button / drop target
+                  const editPointX = clipAEnd * pixelsPerSecond
+                  const dropKey = `${clipA.id}-${clipB.id}`
+                  const isDropTarget = transitionDropTarget === dropKey
                   
                   return (
                     <div
                       key={`edit-${clipA.id}-${clipB.id}`}
-                      className="absolute top-0 bottom-0 z-20 group/edit"
+                      className={`absolute top-0 bottom-0 z-20 group/edit ${isDropTarget ? 'bg-purple-500/10' : ''}`}
                       style={{ left: `${editPointX - 8}px`, width: '16px' }}
+                      onDragOver={(e) => {
+                        const payload = parseTransitionDrop(e)
+                        if (!payload) return
+                        e.preventDefault()
+                        if (transitionDropTarget !== dropKey) {
+                          setTransitionDropTarget(dropKey)
+                        }
+                      }}
+                      onDragLeave={() => {
+                        if (transitionDropTarget === dropKey) {
+                          setTransitionDropTarget(null)
+                        }
+                      }}
+                      onDrop={(e) => {
+                        const payload = parseTransitionDrop(e)
+                        if (!payload) return
+                        e.preventDefault()
+                        setTransitionDropTarget(null)
+                        const { type, duration } = payload
+                        const existingTransition = getTransitionBetween(clipA.id, clipB.id)
+                        if (existingTransition) {
+                          updateTransition(existingTransition.id, { type, duration })
+                        } else {
+                          addTransition(clipA.id, clipB.id, type, duration)
+                        }
+                      }}
                     >
-                      {/* Roll edit handle - full height invisible zone that becomes visible on hover */}
+                      {/* Roll edit handle */}
                       <div
                         className="absolute inset-0 cursor-ew-resize flex items-center justify-center"
                         onMouseDown={(e) => {
                           e.stopPropagation()
                           e.preventDefault()
-                          // Save to history before roll edit
                           saveToHistory()
                           setRollEditState({
                             clipAId: clipA.id,
                             clipBId: clipB.id,
                             startX: e.clientX,
-                            originalEditPoint: clipA.startTime + clipA.duration,
+                            originalEditPoint: clipAEnd,
                             clipAOriginalDuration: clipA.duration,
                             clipBOriginalStart: clipB.startTime,
                             clipBOriginalDuration: clipB.duration
@@ -1910,70 +2076,18 @@ function Timeline({ onOpenAudioGenerate }) {
                         }}
                         title="Drag to roll edit (extend one clip, shorten the other)"
                       >
-                        {/* Visual indicator line */}
                         <div className="w-0.5 h-full bg-white/0 group-hover/edit:bg-yellow-400/70 transition-colors" />
                       </div>
                       
-                      {/* Transition button - positioned in center */}
+                      {/* Add transition button */}
                       <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-auto">
-                        {existingTransition ? (
-                          <div className="relative group/trans">
-                            {/* Transition indicator with type */}
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                removeTransition(existingTransition.id)
-                              }}
-                              className="w-5 h-5 rounded-full bg-sf-accent flex items-center justify-center hover:bg-sf-error transition-colors relative"
-                              title={`${existingTransition.type} (${existingTransition.duration}s) - Click to remove`}
-                            >
-                              <span className="text-[8px] text-white">
-                                {TRANSITION_TYPES.find(t => t.id === existingTransition.type)?.icon || '⚪'}
-                              </span>
-                            </button>
-                            
-                            {/* Draggable transition duration handles */}
-                            <div
-                              className="absolute -left-2 top-1/2 -translate-y-1/2 w-1.5 h-6 bg-sf-accent/50 hover:bg-sf-accent cursor-ew-resize opacity-0 group-hover/trans:opacity-100 transition-opacity rounded-l"
-                              onMouseDown={(e) => {
-                                e.stopPropagation()
-                                setTransitionDragState({
-                                  transitionId: existingTransition.id,
-                                  startX: e.clientX,
-                                  startDuration: existingTransition.duration,
-                                  edge: 'left'
-                                })
-                              }}
-                              title="Drag to adjust transition duration"
-                            />
-                            <div
-                              className="absolute -right-2 top-1/2 -translate-y-1/2 w-1.5 h-6 bg-sf-accent/50 hover:bg-sf-accent cursor-ew-resize opacity-0 group-hover/trans:opacity-100 transition-opacity rounded-r"
-                              onMouseDown={(e) => {
-                                e.stopPropagation()
-                                setTransitionDragState({
-                                  transitionId: existingTransition.id,
-                                  startX: e.clientX,
-                                  startDuration: existingTransition.duration,
-                                  edge: 'right'
-                                })
-                              }}
-                              title="Drag to adjust transition duration"
-                            />
-                            
-                            {/* Duration label */}
-                            <div className="absolute -bottom-4 left-1/2 -translate-x-1/2 text-[8px] text-sf-accent whitespace-nowrap opacity-0 group-hover/trans:opacity-100">
-                              {existingTransition.duration.toFixed(1)}s
-                            </div>
-                          </div>
-                        ) : (
-                          <button
-                            onClick={(e) => handleAddTransition(e, clipA, clipB)}
-                            className="w-5 h-5 rounded-full bg-sf-dark-600 border border-sf-dark-400 flex items-center justify-center hover:bg-sf-accent hover:border-sf-accent transition-colors opacity-0 group-hover/edit:opacity-100"
-                            title="Add transition"
-                          >
-                            <Plus className="w-3 h-3 text-white" />
-                          </button>
-                        )}
+                        <button
+                          onClick={(e) => handleAddTransition(e, clipA, clipB)}
+                          className="w-5 h-5 rounded-full bg-sf-dark-600 border border-sf-dark-400 flex items-center justify-center hover:bg-purple-600 hover:border-purple-500 transition-colors opacity-0 group-hover/edit:opacity-100"
+                          title="Add transition"
+                        >
+                          <Plus className="w-3 h-3 text-white" />
+                        </button>
                       </div>
                     </div>
                   )
@@ -2242,32 +2356,67 @@ function Timeline({ onOpenAudioGenerate }) {
         </div>
       </div>
       
-      {/* Transition Type Selection Menu (Portal) */}
-      {transitionMenu && (
-        <div
-          className="fixed z-50 bg-sf-dark-800 border border-sf-dark-600 rounded-lg shadow-xl py-1 min-w-[140px]"
-          style={{ 
-            left: `${transitionMenu.x}px`, 
-            top: `${transitionMenu.y}px`,
-            transform: 'translate(-50%, 8px)'
-          }}
-          onClick={(e) => e.stopPropagation()}
-        >
-          <div className="px-2 py-1 text-[10px] text-sf-text-muted uppercase tracking-wider border-b border-sf-dark-600 mb-1">
-            Add Transition
+      {/* Transition Type Selection Menu (Portal) - Resolve-style */}
+      {transitionMenu && (() => {
+        const availableDurations = getAvailableDurations()
+        const maxDuration = getMaxTransitionDuration(transitionMenu.clipA.id, transitionMenu.clipB.id)
+        const maxFrames = Math.floor(maxDuration * FRAME_RATE)
+        
+        return (
+          <div
+            className="fixed z-50 bg-sf-dark-800 border border-sf-dark-600 rounded-lg shadow-xl py-1 min-w-[200px]"
+            style={{ 
+              left: `${transitionMenu.x}px`, 
+              top: `${transitionMenu.y}px`,
+              transform: 'translate(-50%, 8px)'
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {availableDurations.length > 0 ? (
+              <>
+                <div className="px-2 py-1 text-[10px] text-sf-text-muted uppercase tracking-wider border-b border-sf-dark-600 mb-1">
+                  Add Transition ({maxFrames} frames max)
+                </div>
+                {availableDurations.map((duration) => (
+                  <button
+                    key={duration.frames}
+                    onClick={() => handleSelectTransition('dissolve', duration.seconds)}
+                    className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 transition-colors"
+                  >
+                    <span className="w-4 text-center">⚪</span>
+                    <span>Add {duration.frames} frame Cross Dissolve</span>
+                  </button>
+                ))}
+                <div className="h-px bg-sf-dark-600 my-1" />
+                <div className="px-2 py-1 text-[10px] text-sf-text-muted uppercase tracking-wider">
+                  Other Transitions
+                </div>
+                {TRANSITION_TYPES.filter(t => t.id !== 'dissolve').map((type) => (
+                  <button
+                    key={type.id}
+                    onClick={() => handleSelectTransition(type.id, availableDurations[1]?.seconds || availableDurations[0]?.seconds || 0.5)}
+                    className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 transition-colors"
+                  >
+                    <span className="w-4 text-center">{type.icon}</span>
+                    <span>{type.name}</span>
+                  </button>
+                ))}
+              </>
+            ) : (
+              <div className="px-3 py-2 text-xs text-sf-text-muted">
+                <div className="flex items-center gap-2 mb-1">
+                  <AlertTriangle className="w-4 h-4 text-amber-500" />
+                  <span className="font-medium text-sf-text-primary">Insufficient Handles</span>
+                </div>
+                <p className="text-[10px] leading-tight">
+                  Cannot add transition. The clips need more footage before/after their trim points.
+                  Extend the clips or use source media with more footage.
+                </p>
+              </div>
+            )}
           </div>
-          {TRANSITION_TYPES.map((type) => (
-            <button
-              key={type.id}
-              onClick={() => handleSelectTransitionType(type.id)}
-              className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 transition-colors"
-            >
-              <span className="w-4 text-center">{type.icon}</span>
-              <span>{type.name}</span>
-            </button>
-          ))}
-        </div>
-      )}
+        )
+      })()}
       
       {/* Clip Context Menu (Portal) */}
       {clipContextMenu && (
