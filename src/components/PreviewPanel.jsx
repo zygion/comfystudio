@@ -584,7 +584,7 @@ function PreviewPanel() {
   // Handle add to timeline
   const handleAddToTimeline = () => {
     if (currentPreview) {
-      addClip('video-1', currentPreview)
+      addClip('video-1', currentPreview, null, timelineSettings?.fps)
       setJustAdded(true)
       setTimeout(() => setJustAdded(false), 2000)
     }
@@ -628,6 +628,18 @@ function PreviewPanel() {
   const hasContent = previewMode === 'timeline' 
     ? (clips.length > 0)
     : (currentPreview !== null)
+
+  const previewFps = useMemo(() => {
+    if (!currentPreview) return null
+    const rawFps = currentPreview.settings?.fps ?? currentPreview.fps
+    const parsed = Number(rawFps)
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : null
+  }, [currentPreview])
+
+  const previewFpsLabel = useMemo(() => {
+    if (!previewFps) return null
+    return previewFps % 1 === 0 ? String(previewFps) : previewFps.toFixed(2)
+  }, [previewFps])
 
   // When a new asset preview is set, reset video to start and pause
   // (DaVinci Resolve behavior - asset selected shows at start, paused)
@@ -870,7 +882,7 @@ function PreviewPanel() {
         break
       case 'add-to-timeline':
         if (currentPreview) {
-          addClip('video-1', currentPreview)
+          addClip('video-1', currentPreview, null, timelineSettings?.fps)
           setJustAdded(true)
           setTimeout(() => setJustAdded(false), 2000)
         }
@@ -1402,6 +1414,13 @@ function PreviewPanel() {
                       {currentPreview.type !== 'image' && currentPreview.type !== 'mask' && (currentPreview.settings?.duration || currentPreview.duration) && (
                         <div className="px-2 py-1 bg-sf-dark-900/80 rounded text-xs text-sf-text-muted">
                           {(currentPreview.settings?.duration || currentPreview.duration)?.toFixed(2)}s
+                        </div>
+                      )}
+
+                      {/* FPS (video only) */}
+                      {currentPreview.type === 'video' && previewFpsLabel && (
+                        <div className="px-2 py-1 bg-sf-dark-900/80 rounded text-xs text-sf-text-muted">
+                          {previewFpsLabel} fps
                         </div>
                       )}
                       

@@ -29,6 +29,9 @@ export function useTimelinePlayback() {
     const activeClip = getActiveClipAtTime(time)
     const transitionInfo = getTransitionAtTime(time)
     const endTime = getTimelineEndTime()
+    const timeScale = activeClip?.sourceTimeScale || (activeClip?.timelineFps && activeClip?.sourceFps
+      ? activeClip.timelineFps / activeClip.sourceFps
+      : 1)
     
     return {
       activeClip,
@@ -36,7 +39,7 @@ export function useTimelinePlayback() {
       endTime,
       // Calculate the time within the source video
       sourceTime: activeClip 
-        ? activeClip.trimStart + (time - activeClip.startTime)
+        ? (activeClip.trimStart || 0) + (time - activeClip.startTime) * timeScale
         : 0
     }
   }, [getActiveClipAtTime, getTransitionAtTime, getTimelineEndTime])
@@ -144,7 +147,10 @@ export function useTimelinePlayback() {
   const syncVideoToTimeline = useCallback((videoRef, clip, currentTime) => {
     if (!videoRef || !clip) return
     
-    const sourceTime = clip.trimStart + (currentTime - clip.startTime)
+    const timeScale = clip.sourceTimeScale || (clip.timelineFps && clip.sourceFps
+      ? clip.timelineFps / clip.sourceFps
+      : 1)
+    const sourceTime = (clip.trimStart || 0) + (currentTime - clip.startTime) * timeScale
     
     // Only seek if difference is significant (> 0.1s) to avoid constant seeking
     if (Math.abs(videoRef.currentTime - sourceTime) > 0.1) {

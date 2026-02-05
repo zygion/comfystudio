@@ -1,22 +1,18 @@
 import { useState } from 'react'
 import { 
-  Sparkles, FolderOpen, Workflow, Settings, Type, SlidersHorizontal,
+  FolderOpen, Settings, Type, SlidersHorizontal,
   ChevronLeft, ChevronRight, PanelLeftClose, PanelLeft
 } from 'lucide-react'
-import GeneratePanel from './GeneratePanel'
 import AssetsPanel from './panels/AssetsPanel'
-import WorkflowsPanel from './panels/WorkflowsPanel'
 import SettingsPanel from './panels/SettingsPanel'
 import TextPanel from './panels/TextPanel'
 import EffectsPanel from './panels/EffectsPanel'
 
 function LeftPanel({ isExpanded, onToggleExpanded, activeTab, onTabChange, isFullHeight = false, onToggleFullHeight }) {
   const tabs = [
-    { id: 'generate', label: 'Generate', icon: Sparkles },
+    { id: 'assets', label: 'Assets', icon: FolderOpen },
     { id: 'text', label: 'Text', icon: Type },
     { id: 'effects', label: 'Effects', icon: SlidersHorizontal },
-    { id: 'assets', label: 'Assets', icon: FolderOpen },
-    { id: 'workflows', label: 'Workflows', icon: Workflow },
     { id: 'settings', label: 'Settings', icon: Settings },
   ]
 
@@ -36,20 +32,16 @@ function LeftPanel({ isExpanded, onToggleExpanded, activeTab, onTabChange, isFul
 
   const renderContent = () => {
     switch (activeTab) {
-      case 'generate':
-        return <GeneratePanel />
       case 'text':
         return <TextPanel />
       case 'effects':
         return <EffectsPanel />
       case 'assets':
         return <AssetsPanel />
-      case 'workflows':
-        return <WorkflowsPanel />
       case 'settings':
         return <SettingsPanel />
       default:
-        return <GeneratePanel />
+        return <AssetsPanel />
     }
   }
 

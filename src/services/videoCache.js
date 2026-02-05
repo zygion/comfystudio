@@ -205,8 +205,11 @@ class VideoCache {
     const video = cached.videoElement
     cached.lastUsed = Date.now()
 
-    // Calculate the time within the source video
-    const sourceTime = (clip.trimStart || 0) + (timelineTime - clip.startTime)
+    // Calculate the time within the source video (fps-aware)
+    const timeScale = clip.sourceTimeScale || (clip.timelineFps && clip.sourceFps
+      ? clip.timelineFps / clip.sourceFps
+      : 1)
+    const sourceTime = (clip.trimStart || 0) + (timelineTime - clip.startTime) * timeScale
     const timeDiff = Math.abs(video.currentTime - sourceTime)
     
     // Use different thresholds for playing vs paused

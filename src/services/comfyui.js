@@ -538,4 +538,209 @@ export function modifyMaskWorkflow(workflow, options = {}) {
   return modified;
 }
 
+/**
+ * Workflow modifier for WAN 2.2 14B Image-to-Video
+ */
+export function modifyWAN22Workflow(workflow, options = {}) {
+  const {
+    prompt = '',
+    negativePrompt = '',
+    inputImage = '',      // Filename uploaded to ComfyUI
+    width = 800,
+    height = 1424,
+    frames = 81,
+    fps = 16,
+    seed = Math.floor(Math.random() * 1000000000000),
+  } = options
+
+  const modified = JSON.parse(JSON.stringify(workflow))
+
+  // Positive prompt (node 93)
+  if (modified['93']) {
+    modified['93'].inputs.text = prompt
+  }
+  // Negative prompt (node 89)
+  if (modified['89']) {
+    modified['89'].inputs.text = negativePrompt
+  }
+  // Image input (node 97)
+  if (modified['97']) {
+    modified['97'].inputs.image = inputImage
+  }
+  // Resolution + frame count (node 98 - WanImageToVideo)
+  if (modified['98']) {
+    modified['98'].inputs.width = width
+    modified['98'].inputs.height = height
+    modified['98'].inputs.length = frames
+  }
+  // FPS (node 94 - CreateVideo)
+  if (modified['94']) {
+    modified['94'].inputs.fps = fps
+  }
+  // Seed (node 86 - KSamplerAdvanced 1st pass)
+  if (modified['86']) {
+    modified['86'].inputs.noise_seed = seed
+  }
+  // Output prefix (node 108)
+  if (modified['108']) {
+    modified['108'].inputs.filename_prefix = 'video/StoryFlow_wan'
+  }
+
+  return modified
+}
+
+/**
+ * Workflow modifier for 1-Click Multiple Angles (Qwen Image Edit)
+ * Generates 8 camera angles from a single image
+ */
+export function modifyMultipleAnglesWorkflow(workflow, options = {}) {
+  const {
+    inputImage = '',      // Filename uploaded to ComfyUI
+    seed = Math.floor(Math.random() * 1000000000000),
+    // Allow overriding individual angle prompts
+    prompts = {},
+  } = options
+
+  const modified = JSON.parse(JSON.stringify(workflow))
+
+  // Image input (node 25)
+  if (modified['25']) {
+    modified['25'].inputs.image = inputImage
+  }
+
+  // Default angle prompts
+  const defaultPrompts = {
+    closeUp:  'Turn the camera to a close-up.',
+    wide:     'Turn the camera to a wide-angle lens.',
+    right45:  'Rotate the camera 45 degrees to the right.',
+    right90:  'Rotate the camera 90 degrees to the right.',
+    aerial:   'Turn the camera to an aerial view.',
+    lowAngle: 'Turn the camera to a low-angle view.',
+    left45:   'Rotate the camera 45 degrees to the left.',
+    left90:   'Rotate the camera 90 degrees to the left.',
+  }
+
+  // Prompt node mapping: angle key -> node ID
+  const promptNodes = {
+    closeUp:  '66',
+    wide:     '67',
+    right45:  '69',
+    right90:  '68',
+    aerial:   '70',
+    lowAngle: '71',
+    left45:   '73',
+    left90:   '72',
+  }
+
+  // KSampler node mapping for seeds
+  const seedNodes = [
+    '65:33:21', '65:35:21', '65:37:21', '65:39:21',
+    '65:40:21', '65:42:21', '65:44:21', '65:46:21',
+  ]
+
+  // Update prompts
+  for (const [key, nodeId] of Object.entries(promptNodes)) {
+    if (modified[nodeId]) {
+      modified[nodeId].inputs.value = prompts[key] || defaultPrompts[key]
+    }
+  }
+
+  // Update seeds (same seed for consistency, or random per angle)
+  for (const nodeId of seedNodes) {
+    if (modified[nodeId]) {
+      modified[nodeId].inputs.seed = seed
+    }
+  }
+
+  // Update save prefixes to StoryFlow
+  const saveNodes = { '31': 'close_up', '34': 'wide_shot', '36': '45_right', '38': '90_right', '47': '90_left', '41': 'aerial_view', '43': 'low_angle', '45': '45_left' }
+  for (const [nodeId, suffix] of Object.entries(saveNodes)) {
+    if (modified[nodeId]) {
+      modified[nodeId].inputs.filename_prefix = `StoryFlow-${suffix}`
+    }
+  }
+
+  return modified
+}
+
+/**
+ * Workflow modifier for Inflation / Image Edit (Qwen 2511)
+ */
+export function modifyInflationWorkflow(workflow, options = {}) {
+  const {
+    prompt = 'inflate the subject',
+    inputImage = '',      // Filename uploaded to ComfyUI
+    seed = Math.floor(Math.random() * 1000000000000),
+    steps = 40,
+    cfg = 4,
+  } = options
+
+  const modified = JSON.parse(JSON.stringify(workflow))
+
+  // Image input (node 41)
+  if (modified['41']) {
+    modified['41'].inputs.image = inputImage
+  }
+  // Positive prompt (node 89:68)
+  if (modified['89:68']) {
+    modified['89:68'].inputs.prompt = prompt
+  }
+  // KSampler settings (node 89:65)
+  if (modified['89:65']) {
+    modified['89:65'].inputs.seed = seed
+    modified['89:65'].inputs.steps = steps
+    modified['89:65'].inputs.cfg = cfg
+  }
+  // Output prefix (node 9)
+  if (modified['9']) {
+    modified['9'].inputs.filename_prefix = 'StoryFlow_edit'
+  }
+
+  return modified
+}
+
+/**
+ * Workflow modifier for Music Generation (AceStep 1.5)
+ */
+export function modifyMusicWorkflow(workflow, options = {}) {
+  const {
+    tags = '',            // Style/genre description
+    lyrics = '',          // Song lyrics (can be empty for instrumental)
+    duration = 30,        // Duration in seconds
+    bpm = 120,
+    seed = Math.floor(Math.random() * 1000000),
+    timesignature = '4',
+    language = 'en',
+    keyscale = 'C major',
+  } = options
+
+  const modified = JSON.parse(JSON.stringify(workflow))
+
+  // Text encoder (node 94 - TextEncodeAceStepAudio1.5)
+  if (modified['94']) {
+    modified['94'].inputs.tags = tags
+    modified['94'].inputs.lyrics = lyrics
+    modified['94'].inputs.duration = duration
+    modified['94'].inputs.bpm = bpm
+    modified['94'].inputs.seed = seed
+    modified['94'].inputs.timesignature = timesignature
+    modified['94'].inputs.language = language
+    modified['94'].inputs.keyscale = keyscale
+  }
+  // Latent audio duration (node 98)
+  if (modified['98']) {
+    modified['98'].inputs.seconds = duration
+  }
+  // KSampler seed (node 3)
+  if (modified['3']) {
+    modified['3'].inputs.seed = seed
+  }
+  // Output prefix (node 107)
+  if (modified['107']) {
+    modified['107'].inputs.filename_prefix = 'audio/StoryFlow'
+  }
+
+  return modified
+}
+
 export default comfyui;

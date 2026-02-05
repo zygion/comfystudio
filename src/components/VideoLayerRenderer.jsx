@@ -208,7 +208,10 @@ function useMaskEffectStyle(clip, playheadPosition, isCachedRender = false) {
     if (maskAsset.maskFrames && maskAsset.maskFrames.length > 1) {
       // Calculate which frame to use based on SOURCE time (trim-aware)
       const clipTime = playheadPosition - clip.startTime
-      const sourceTime = (clip.trimStart || 0) + clipTime
+      const timeScale = clip?.sourceTimeScale || (clip?.timelineFps && clip?.sourceFps
+        ? clip.timelineFps / clip.sourceFps
+        : 1)
+      const sourceTime = (clip.trimStart || 0) + clipTime * timeScale
       const sourceProgress = sourceDuration > 0
         ? Math.max(0, Math.min(1, sourceTime / sourceDuration))
         : 0
@@ -304,9 +307,13 @@ const VideoLayer = memo(function VideoLayer({
   
   // Calculate clip-relative time for keyframe evaluation
   const clipTime = playheadPosition - (clip?.startTime || 0)
+  const rawTimeScale = clip?.sourceTimeScale || (clip?.timelineFps && clip?.sourceFps
+    ? clip.timelineFps / clip.sourceFps
+    : 1)
+  const timeScale = isCachedRender ? 1 : rawTimeScale
   
   // Calculate source time for sprite frame lookup
-  const sourceTime = (clip?.trimStart || 0) + clipTime
+  const sourceTime = (clip?.trimStart || 0) + clipTime * timeScale
   
   // Get animated transform (with keyframes applied)
   const animatedTransform = useMemo(() => {
@@ -395,8 +402,8 @@ const VideoLayer = memo(function VideoLayer({
         
         // For transition clips, pre-seek to the correct position immediately
         if (isInTransition && clip) {
-          const sourceTime = (clip.trimStart || 0) + clipTime
-          const maxTime = clip.sourceDuration || clip.duration
+          const sourceTime = (clip.trimStart || 0) + clipTime * timeScale
+          const maxTime = clip.sourceDuration || clip.trimEnd || (clip.duration * timeScale)
           const clampedTime = Math.max(0, Math.min(sourceTime, maxTime - 0.01))
           videoRef.current.currentTime = clampedTime
         }
@@ -433,8 +440,8 @@ const VideoLayer = memo(function VideoLayer({
         // Force a final precise seek when scrubbing stops
         if (videoRef.current && clip) {
           const currentPlayhead = useTimelineStore.getState().playheadPosition
-          const sourceTime = (clip.trimStart || 0) + (currentPlayhead - clip.startTime)
-          const maxTime = clip.sourceDuration || clip.duration
+          const sourceTime = (clip.trimStart || 0) + (currentPlayhead - clip.startTime) * timeScale
+          const maxTime = clip.sourceDuration || clip.trimEnd || (clip.duration * timeScale)
           const clampedTime = Math.max(0, Math.min(sourceTime, maxTime))
           videoRef.current.currentTime = clampedTime
         }
@@ -460,10 +467,10 @@ const VideoLayer = memo(function VideoLayer({
     if (!videoRef.current || !clip) return
     
     const video = videoRef.current
-    const sourceTime = (clip.trimStart || 0) + clipTime
+    const sourceTime = (clip.trimStart || 0) + clipTime * timeScale
     
     // Clamp sourceTime to valid range
-    const maxTime = clip.sourceDuration || clip.duration
+    const maxTime = clip.sourceDuration || clip.trimEnd || (clip.duration * timeScale)
     const clampedTime = Math.max(0, Math.min(sourceTime, maxTime - 0.01)) // Stay slightly before end
     
     // Calculate time difference
@@ -473,13 +480,21 @@ const VideoLayer = memo(function VideoLayer({
     if (isPlaying) {
       // When playing: Let the video play naturally, only correct large drifts
       // During transitions, use a larger threshold to avoid fighting between two videos
-      const driftThreshold = isInTransition ? 0.25 : 0.15
+      const speedMismatch = Math.abs(timeScale - 1) > 0.001
+      const driftThreshold = isInTransition
+        ? 0.25
+        : (speedMismatch ? 0.5 : 0.15)
       
       if (timeDiff > driftThreshold) {
         video.currentTime = clampedTime
         lastSyncTime.current = playheadPosition
       }
       
+      // Ensure playback rate matches clip time scale
+      if (Number.isFinite(timeScale) && timeScale > 0 && Math.abs(video.playbackRate - timeScale) > 0.001) {
+        video.playbackRate = timeScale
+      }
+
       // Start playing if paused
       if (video.paused && video.readyState >= 2) {
         video.play().catch(() => {})

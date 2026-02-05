@@ -168,9 +168,10 @@ export const useProjectStore = create(
                 const currentTimelineId = projectData.currentTimelineId || projectData.timelines?.[0]?.id
                 const currentTimeline = projectData.timelines?.find(t => t.id === currentTimelineId) || projectData.timelines?.[0]
                 
-                // Load timeline data
+                // Load timeline data (normalize clip timebases with asset fps)
                 if (currentTimeline) {
-                  useTimelineStore.getState().loadFromProject(currentTimeline)
+                  const timelineFps = currentTimeline?.fps || projectData?.settings?.fps || 24
+                  useTimelineStore.getState().loadFromProject(currentTimeline, projectData.assets || [], timelineFps)
                 }
                 
                 // Regenerate asset URLs from project files
@@ -298,7 +299,7 @@ export const useProjectStore = create(
           }
           
           // Load the first timeline into the timeline store
-          useTimelineStore.getState().loadFromProject(defaultTimeline)
+          useTimelineStore.getState().loadFromProject(defaultTimeline, projectData.assets, fps)
           await useAssetsStore.getState().loadFromProject(projectData.assets, projectHandleOrPath)
           
           set((state) => ({
@@ -365,7 +366,8 @@ export const useProjectStore = create(
           const currentTimeline = projectData.timelines.find(t => t.id === currentTimelineId) || projectData.timelines[0]
           
           // Load timeline and assets data into their respective stores
-          useTimelineStore.getState().loadFromProject(currentTimeline)
+          const timelineFps = currentTimeline?.fps || projectData?.settings?.fps || 24
+          useTimelineStore.getState().loadFromProject(currentTimeline, projectData.assets, timelineFps)
           await useAssetsStore.getState().loadFromProject(projectData.assets, projectHandleOrPath)
           
           // Load thumbnail sprites in background (Electron only)
@@ -576,7 +578,8 @@ export const useProjectStore = create(
         }))
         
         // Load the target timeline into the timeline store
-        useTimelineStore.getState().loadFromProject(targetTimeline)
+        const timelineFps = targetTimeline?.fps || state.currentProject?.settings?.fps || 24
+        useTimelineStore.getState().loadFromProject(targetTimeline, state.currentProject?.assets || [], timelineFps)
         
         // Update current timeline ID
         set({ currentTimelineId: timelineId })
@@ -708,7 +711,8 @@ export const useProjectStore = create(
           const nextTimeline = remainingTimelines[0]
           
           // Load the next timeline
-          useTimelineStore.getState().loadFromProject(nextTimeline)
+          const timelineFps = nextTimeline?.fps || state.currentProject?.settings?.fps || 24
+          useTimelineStore.getState().loadFromProject(nextTimeline, state.currentProject?.assets || [], timelineFps)
           
           set((state) => ({
             currentProject: {

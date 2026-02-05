@@ -269,9 +269,12 @@ class RenderCacheService {
 
       // Calculate frame timing - use source video's frame rate if available
       const clipDuration = clip.duration
-      const sourceFrameRate = fps // Could detect from source video
+      const sourceFrameRate = fps // Timeline FPS
       const totalFrames = Math.ceil(clipDuration * sourceFrameRate)
       const frameInterval = 1 / sourceFrameRate
+      const timeScale = clip.sourceTimeScale || (clip.timelineFps && clip.sourceFps
+        ? clip.timelineFps / clip.sourceFps
+        : 1)
 
       // Notify rendering start
       this.notifyListeners(clip.id, { status: 'rendering', progress: 10 })
@@ -288,7 +291,7 @@ class RenderCacheService {
 
         // Calculate time in source video
         const clipTime = frameIndex * frameInterval
-        const sourceTime = (clip.trimStart || 0) + clipTime
+        const sourceTime = (clip.trimStart || 0) + clipTime * timeScale
 
         // Seek video to frame
         video.currentTime = sourceTime
@@ -308,7 +311,7 @@ class RenderCacheService {
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
 
         // Apply mask (align to source time so trims stay in sync)
-        const sourceDuration = clip.sourceDuration || clipDuration
+        const sourceDuration = clip.sourceDuration || clip.trimEnd || (clipDuration * timeScale)
         const sourceProgress = sourceDuration > 0
           ? Math.max(0, Math.min(1, sourceTime / sourceDuration))
           : 0

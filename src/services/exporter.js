@@ -1,0 +1,881 @@
+import useTimelineStore from '../stores/timelineStore'
+import useAssetsStore from '../stores/assetsStore'
+import useProjectStore from '../stores/projectStore'
+
+const DEFAULT_SAMPLE_RATE = 44100
+
+const EXPORT_STATUS = {
+  preparing: 'Preparing export...',
+  rendering: 'Rendering frames...',
+  audio: 'Mixing audio...',
+  encoding: 'Encoding video...',
+  done: 'Export complete',
+}
+
+const clamp = (value, min, max) => Math.max(min, Math.min(max, value))
+
+const waitForEvent = (target, eventName) => new Promise((resolve, reject) => {
+  const onSuccess = () => {
+    cleanup()
+    resolve()
+  }
+  const onError = (err) => {
+    cleanup()
+    reject(err)
+  }
+  const cleanup = () => {
+    target.removeEventListener(eventName, onSuccess)
+    target.removeEventListener('error', onError)
+  }
+  target.addEventListener(eventName, onSuccess, { once: true })
+  target.addEventListener('error', onError, { once: true })
+})
+
+const loadImage = async (url) => {
+  const img = new Image()
+  img.crossOrigin = 'anonymous'
+  img.src = url
+  if (img.complete && img.naturalWidth > 0) {
+    return img
+  }
+  await waitForEvent(img, 'load')
+  return img
+}
+
+const loadVideo = async (url) => {
+  const video = document.createElement('video')
+  video.crossOrigin = 'anonymous'
+  video.src = url
+  video.muted = true
+  video.playsInline = true
+  video.preload = 'auto'
+  
+  // Add timeout to prevent infinite hang if video never loads
+  const loadPromise = waitForEvent(video, 'loadedmetadata')
+  const timeoutPromise = new Promise((_, reject) => 
+    setTimeout(() => reject(new Error(`Video load timeout for: ${url}`)), 30000)
+  )
+  
+  await Promise.race([loadPromise, timeoutPromise])
+  console.log(`Loaded video: ${url}, duration: ${video.duration}s`)
+  return video
+}
+
+const seekVideo = async (video, time, fastSeek = true) => {
+  const targetTime = clamp(time, 0, video.duration || time)
+  
+  // Set the time (fast seek uses keyframe jumps when available)
+  if (fastSeek && typeof video.fastSeek === 'function') {
+    video.fastSeek(targetTime)
+  } else {
+    video.currentTime = targetTime
+  }
+  
+  // Wait for seek to complete
+  if (video.seeking) {
+    await Promise.race([
+      waitForEvent(video, 'seeked'),
+      new Promise((resolve) => setTimeout(resolve, 2000))
+    ])
+  }
+
+  // Fast mode: minimal wait, may be less accurate
+  if (fastSeek) {
+    await new Promise((resolve) => setTimeout(resolve, 5))
+    return
+  }
+  
+  // CRITICAL: Force the frame to decode by briefly playing
+  // requestVideoFrameCallback doesn't work reliably on paused/seeking video
+  // This play/pause trick forces the decoder to present the frame
+  try {
+    video.muted = true
+    const playPromise = video.play()
+    if (playPromise) {
+      await playPromise.catch(() => {}) // Ignore play errors
+    }
+    // Immediately pause - we just needed to trigger frame decode
+    video.pause()
+    
+    // Small delay to ensure the frame is rendered to the video element
+    await new Promise(resolve => setTimeout(resolve, 20))
+  } catch (e) {
+    // If play fails, just wait a bit for decode
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+}
+
+const getTransitionCanvasStyle = (transitionInfo, isVideoA) => {
+  if (!transitionInfo) {
+    return { opacity: isVideoA ? 1 : 0, display: isVideoA }
+  }
+  
+  const { transition, progress } = transitionInfo
+  const type = transition?.type || 'dissolve'
+  const zoomAmount = transition?.settings?.zoomAmount ?? 0.1
+  const blurAmount = transition?.settings?.blurAmount ?? 8
+  const edgeMode = transition?.kind === 'edge'
+  const edge = transitionInfo?.edge
+  const effectiveIsVideoA = edgeMode ? edge === 'out' : isVideoA
+  
+  const base = {
+    opacity: 1,
+    translateX: 0,
+    translateY: 0,
+    scale: 1,
+    clipInset: null,
+    blur: 0,
+    display: true,
+  }
+  
+  if (edgeMode && (type === 'fade-black' || type === 'fade-white')) {
+    const opacity = effectiveIsVideoA ? 1 - progress : progress
+    return { ...base, opacity }
+  }
+  
+  if (effectiveIsVideoA) {
+    switch (type) {
+      case 'dissolve':
+        return { ...base, opacity: 1 - progress }
+      case 'fade-black':
+      case 'fade-white':
+        return { ...base, opacity: progress < 0.5 ? 1 - progress * 2 : 0 }
+      case 'wipe-left':
+        return { ...base, clipInset: { top: 0, right: progress, bottom: 0, left: 0 } }
+      case 'wipe-right':
+        return { ...base, clipInset: { top: 0, right: 0, bottom: 0, left: progress } }
+      case 'wipe-up':
+        return { ...base, clipInset: { top: 0, right: 0, bottom: progress, left: 0 } }
+      case 'wipe-down':
+        return { ...base, clipInset: { top: progress, right: 0, bottom: 0, left: 0 } }
+      case 'slide-left':
+        return { ...base, translateX: -progress }
+      case 'slide-right':
+        return { ...base, translateX: progress }
+      case 'slide-up':
+        return { ...base, translateY: -progress }
+      case 'slide-down':
+        return { ...base, translateY: progress }
+      case 'zoom-in':
+        return { ...base, scale: 1 + progress * zoomAmount, opacity: 1 - progress }
+      case 'zoom-out':
+        return { ...base, scale: 1 - progress * zoomAmount, opacity: 1 - progress }
+      case 'blur':
+        return { ...base, blur: progress * blurAmount, opacity: 1 - progress }
+      default:
+        return { ...base, opacity: 1 - progress }
+    }
+  }
+  
+  switch (type) {
+    case 'dissolve':
+      return { ...base, opacity: progress }
+    case 'fade-black':
+    case 'fade-white':
+      return { ...base, opacity: progress > 0.5 ? (progress - 0.5) * 2 : 0 }
+    case 'wipe-left':
+      return { ...base, clipInset: { top: 0, right: 0, bottom: 0, left: 1 - progress } }
+    case 'wipe-right':
+      return { ...base, clipInset: { top: 0, right: 1 - progress, bottom: 0, left: 0 } }
+    case 'wipe-up':
+      return { ...base, clipInset: { top: 1 - progress, right: 0, bottom: 0, left: 0 } }
+    case 'wipe-down':
+      return { ...base, clipInset: { top: 0, right: 0, bottom: 1 - progress, left: 0 } }
+    case 'slide-left':
+      return { ...base, translateX: 1 - progress }
+    case 'slide-right':
+      return { ...base, translateX: -(1 - progress) }
+    case 'slide-up':
+      return { ...base, translateY: 1 - progress }
+    case 'slide-down':
+      return { ...base, translateY: -(1 - progress) }
+    case 'zoom-in':
+      return { ...base, scale: 1 - zoomAmount + progress * zoomAmount, opacity: progress }
+    case 'zoom-out':
+      return { ...base, scale: 1 + zoomAmount - progress * zoomAmount, opacity: progress }
+    case 'blur':
+      return { ...base, blur: (1 - progress) * blurAmount, opacity: progress }
+    default:
+      return { ...base, opacity: progress }
+  }
+}
+
+const getFadeOverlayOpacity = (transitionInfo) => {
+  if (!transitionInfo) return null
+  
+  const { transition, progress } = transitionInfo
+  const type = transition?.type
+  const edgeMode = transition?.kind === 'edge'
+  const edge = transitionInfo?.edge
+  
+  if (edgeMode && (type === 'fade-black' || type === 'fade-white')) {
+    return edge === 'in' ? (1 - progress) : progress
+  }
+  
+  if (type === 'fade-black' || type === 'fade-white') {
+    return progress < 0.5 ? progress * 2 : (1 - progress) * 2
+  }
+  
+  return null
+}
+
+const getBaseDrawRect = (assetWidth, assetHeight, canvasWidth, canvasHeight) => {
+  if (!assetWidth || !assetHeight) {
+    return {
+      width: canvasWidth,
+      height: canvasHeight,
+      x: 0,
+      y: 0,
+    }
+  }
+  const scale = Math.min(canvasWidth / assetWidth, canvasHeight / assetHeight)
+  const width = assetWidth * scale
+  const height = assetHeight * scale
+  const x = (canvasWidth - width) / 2
+  const y = (canvasHeight - height) / 2
+  return { width, height, x, y }
+}
+
+const applyClipTransform = (ctx, rect, transform, transitionStyle) => {
+  const {
+    positionX = 0,
+    positionY = 0,
+    scaleX = 100,
+    scaleY = 100,
+    rotation = 0,
+    anchorX = 50,
+    anchorY = 50,
+    flipH = false,
+    flipV = false,
+  } = transform || {}
+  
+  const anchorPxX = rect.width * (anchorX / 100)
+  const anchorPxY = rect.height * (anchorY / 100)
+  const translateX = rect.x + anchorPxX + positionX + (transitionStyle?.translateX || 0) * rect.width
+  const translateY = rect.y + anchorPxY + positionY + (transitionStyle?.translateY || 0) * rect.height
+  const scaleFactorX = (scaleX / 100) * (flipH ? -1 : 1) * (transitionStyle?.scale || 1)
+  const scaleFactorY = (scaleY / 100) * (flipV ? -1 : 1) * (transitionStyle?.scale || 1)
+  
+  ctx.translate(translateX, translateY)
+  if (rotation) {
+    ctx.rotate((rotation * Math.PI) / 180)
+  }
+  ctx.scale(scaleFactorX, scaleFactorY)
+  ctx.translate(-anchorPxX, -anchorPxY)
+}
+
+const applyClipCrop = (ctx, rect, transform) => {
+  const cropTop = transform?.cropTop || 0
+  const cropBottom = transform?.cropBottom || 0
+  const cropLeft = transform?.cropLeft || 0
+  const cropRight = transform?.cropRight || 0
+  if (cropTop === 0 && cropBottom === 0 && cropLeft === 0 && cropRight === 0) {
+    return
+  }
+  const left = rect.width * (cropLeft / 100)
+  const right = rect.width * (cropRight / 100)
+  const top = rect.height * (cropTop / 100)
+  const bottom = rect.height * (cropBottom / 100)
+  ctx.beginPath()
+  ctx.rect(left, top, rect.width - left - right, rect.height - top - bottom)
+  ctx.clip()
+}
+
+const applyTransitionClip = (ctx, rect, transitionStyle) => {
+  if (!transitionStyle?.clipInset) return
+  const { top, right, bottom, left } = transitionStyle.clipInset
+  const insetTop = rect.height * top
+  const insetRight = rect.width * right
+  const insetBottom = rect.height * bottom
+  const insetLeft = rect.width * left
+  ctx.beginPath()
+  ctx.rect(insetLeft, insetTop, rect.width - insetLeft - insetRight, rect.height - insetTop - insetBottom)
+  ctx.clip()
+}
+
+const drawText = (ctx, rect, clip) => {
+  const textProps = clip.textProperties || {}
+  const lines = String(textProps.text || '').split('\n')
+  const fontSize = textProps.fontSize || 48
+  const fontFamily = textProps.fontFamily || 'Inter'
+  const fontWeight = textProps.fontWeight || 'normal'
+  const fontStyle = textProps.fontStyle || 'normal'
+  const lineHeight = (textProps.lineHeight || 1.2) * fontSize
+  const textAlign = textProps.textAlign || 'center'
+  const verticalAlign = textProps.verticalAlign || 'center'
+  const padding = textProps.backgroundPadding || 20
+  
+  ctx.font = `${fontStyle} ${fontWeight} ${fontSize}px ${fontFamily}`
+  ctx.textAlign = textAlign
+  ctx.textBaseline = 'middle'
+  
+  let baseY = rect.y + rect.height / 2
+  if (verticalAlign === 'top') {
+    baseY = rect.y + padding + (lineHeight * lines.length) / 2
+  } else if (verticalAlign === 'bottom') {
+    baseY = rect.y + rect.height - padding - (lineHeight * lines.length) / 2
+  }
+  
+  let baseX = rect.x + rect.width / 2
+  if (textAlign === 'left') {
+    baseX = rect.x + padding
+  } else if (textAlign === 'right') {
+    baseX = rect.x + rect.width - padding
+  }
+  
+  if (textProps.shadow) {
+    ctx.shadowColor = textProps.shadowColor || 'rgba(0,0,0,0.5)'
+    ctx.shadowBlur = textProps.shadowBlur || 4
+    ctx.shadowOffsetX = textProps.shadowOffsetX || 2
+    ctx.shadowOffsetY = textProps.shadowOffsetY || 2
+  } else {
+    ctx.shadowColor = 'transparent'
+    ctx.shadowBlur = 0
+    ctx.shadowOffsetX = 0
+    ctx.shadowOffsetY = 0
+  }
+  
+  if (textProps.backgroundOpacity > 0) {
+    ctx.save()
+    const totalHeight = lineHeight * lines.length
+    const maxLineWidth = Math.max(...lines.map(line => ctx.measureText(line).width), 0)
+    const boxWidth = maxLineWidth + padding * 2
+    const boxHeight = totalHeight + padding * 2
+    let boxX = baseX - boxWidth / 2
+    if (textAlign === 'left') {
+      boxX = baseX - padding
+    } else if (textAlign === 'right') {
+      boxX = baseX - boxWidth + padding
+    }
+    const boxY = baseY - boxHeight / 2
+    ctx.fillStyle = textProps.backgroundColor || '#000000'
+    ctx.globalAlpha = clamp(textProps.backgroundOpacity, 0, 1)
+    ctx.fillRect(boxX, boxY, boxWidth, boxHeight)
+    ctx.restore()
+  }
+  
+  ctx.fillStyle = textProps.textColor || '#FFFFFF'
+  ctx.globalAlpha = 1
+  
+  if (textProps.strokeWidth > 0) {
+    ctx.lineWidth = textProps.strokeWidth
+    ctx.strokeStyle = textProps.strokeColor || '#000000'
+  }
+  
+  lines.forEach((line, index) => {
+    const y = baseY + (index - (lines.length - 1) / 2) * lineHeight
+    if (textProps.strokeWidth > 0) {
+      ctx.strokeText(line, baseX, y)
+    }
+    ctx.fillText(line, baseX, y)
+  })
+}
+
+const getMaskFrameInfo = (clip, maskAsset, time) => {
+  if (!maskAsset) return null
+  const sourceTime = time - clip.startTime + (clip.trimStart || 0)
+  const sourceDuration = clip.sourceDuration || maskAsset.settings?.duration || clip.duration
+  const progress = sourceDuration > 0 ? clamp(sourceTime / sourceDuration, 0, 1) : 0
+  const frames = maskAsset.maskFrames || []
+  if (frames.length > 0) {
+    const frameIndex = clamp(Math.floor(progress * frames.length), 0, frames.length - 1)
+    return frames[frameIndex]?.url || maskAsset.url
+  }
+  return maskAsset.url
+}
+
+const audioBufferToWav = (buffer) => {
+  const numChannels = buffer.numberOfChannels
+  const sampleRate = buffer.sampleRate
+  const numFrames = buffer.length
+  const bytesPerSample = 2
+  const blockAlign = numChannels * bytesPerSample
+  const byteRate = sampleRate * blockAlign
+  const dataSize = numFrames * blockAlign
+  const bufferSize = 44 + dataSize
+  
+  const arrayBuffer = new ArrayBuffer(bufferSize)
+  const view = new DataView(arrayBuffer)
+  
+  const writeString = (offset, string) => {
+    for (let i = 0; i < string.length; i++) {
+      view.setUint8(offset + i, string.charCodeAt(i))
+    }
+  }
+  
+  writeString(0, 'RIFF')
+  view.setUint32(4, 36 + dataSize, true)
+  writeString(8, 'WAVE')
+  writeString(12, 'fmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true)
+  view.setUint16(22, numChannels, true)
+  view.setUint32(24, sampleRate, true)
+  view.setUint32(28, byteRate, true)
+  view.setUint16(32, blockAlign, true)
+  view.setUint16(34, bytesPerSample * 8, true)
+  writeString(36, 'data')
+  view.setUint32(40, dataSize, true)
+  
+  let offset = 44
+  for (let i = 0; i < numFrames; i++) {
+    for (let channel = 0; channel < numChannels; channel++) {
+      const sample = buffer.getChannelData(channel)[i] || 0
+      const clipped = clamp(sample, -1, 1)
+      view.setInt16(offset, clipped * 0x7fff, true)
+      offset += 2
+    }
+  }
+  
+  return arrayBuffer
+}
+
+const formatFrameNumber = (index) => String(index).padStart(6, '0')
+
+export const exportTimeline = async (options = {}, onProgress = () => {}) => {
+  const timelineState = useTimelineStore.getState()
+  const assetsState = useAssetsStore.getState()
+  const projectState = useProjectStore.getState()
+  
+  const {
+    fps = 24,
+    width = 1920,
+    height = 1080,
+    rangeStart = 0,
+    rangeEnd = timelineState.getTimelineEndTime(),
+    format = 'mp4',
+    includeAudio = true,
+    filename = 'export',
+    videoCodec = 'h264',
+    audioCodec = 'aac',
+    useHardwareEncoder = false,
+    nvencPreset = 'p5',
+    preset = 'medium',
+    qualityMode = 'crf',
+    crf = 18,
+    bitrateKbps = 8000,
+    keyframeInterval = null,
+    audioBitrateKbps = 192,
+    audioSampleRate = DEFAULT_SAMPLE_RATE,
+    audioChannels = 2,
+    useCachedRenders = true,
+    fastSeek = true,
+  } = options
+  
+  const totalDuration = Math.max(0, rangeEnd - rangeStart)
+  const totalFrames = Math.ceil(totalDuration * fps)
+  
+  if (!projectState.currentProjectHandle || typeof projectState.currentProjectHandle !== 'string') {
+    throw new Error('Project folder not available for export.')
+  }
+  
+  const outputFolder = await window.electronAPI.pathJoin(projectState.currentProjectHandle, 'renders')
+  await window.electronAPI.createDirectory(outputFolder)
+  
+  const tempFolder = await window.electronAPI.pathJoin(outputFolder, `export_${Date.now()}`)
+  await window.electronAPI.createDirectory(tempFolder)
+  const framesFolder = await window.electronAPI.pathJoin(tempFolder, 'frames')
+  await window.electronAPI.createDirectory(framesFolder)
+  
+  const outputExtension = format === 'webm' ? 'webm' : 'mp4'
+  const defaultOutputPath = await window.electronAPI.pathJoin(
+    outputFolder,
+    `${filename}.${outputExtension}`
+  )
+  
+  const saveDialog = await window.electronAPI.saveFileDialog({
+    title: 'Export Timeline',
+    defaultPath: defaultOutputPath,
+    filters: [
+      { name: outputExtension.toUpperCase(), extensions: [outputExtension] },
+    ],
+  })
+  
+  if (!saveDialog) {
+    throw new Error('Export cancelled')
+  }
+  
+  const outputPath = saveDialog
+  const framePattern = await window.electronAPI.pathJoin(framesFolder, 'frame_%06d.png')
+  const audioPath = await window.electronAPI.pathJoin(tempFolder, 'audio.wav')
+  
+  onProgress({ status: EXPORT_STATUS.preparing, progress: 2 })
+  
+  const canvas = document.createElement('canvas')
+  canvas.width = width
+  canvas.height = height
+  const ctx = canvas.getContext('2d', { alpha: false })
+  
+  const videoElements = new Map()
+  const imageElements = new Map()
+  const maskElements = new Map()
+  const maskRenderBuffers = new Map()
+  const cachedVideoSources = new Map()
+  
+  const videoClips = timelineState.clips.filter(c => c.type === 'video')
+  const imageClips = timelineState.clips.filter(c => c.type === 'image')
+  const textClips = timelineState.clips.filter(c => c.type === 'text')
+
+  if (useCachedRenders) {
+    for (const clip of videoClips) {
+      if (clip.cacheStatus !== 'cached') continue
+      if (clip.cacheUrl) {
+        cachedVideoSources.set(clip.id, clip.cacheUrl)
+        continue
+      }
+      if (clip.cachePath && typeof projectState.currentProjectHandle === 'string') {
+        try {
+          const filePath = await window.electronAPI.pathJoin(projectState.currentProjectHandle, clip.cachePath)
+          const fileUrl = await window.electronAPI.getFileUrlDirect(filePath)
+          if (fileUrl) {
+            cachedVideoSources.set(clip.id, fileUrl)
+          }
+        } catch (err) {
+          console.warn('Failed to load cached render for export:', err)
+        }
+      }
+    }
+  }
+  
+  for (const clip of [...videoClips, ...imageClips]) {
+    const asset = assetsState.getAssetById(clip.assetId)
+    if (!asset?.url) continue
+    if (clip.type === 'video') {
+      const overrideUrl = cachedVideoSources.get(clip.id)
+      const sourceUrl = overrideUrl || asset.url
+      if (!sourceUrl) continue
+      if (!videoElements.has(sourceUrl)) {
+        const video = await loadVideo(sourceUrl)
+        videoElements.set(sourceUrl, video)
+      }
+    } else if (clip.type === 'image') {
+      const sourceUrl = asset.url
+      if (!imageElements.has(sourceUrl)) {
+        imageElements.set(sourceUrl, await loadImage(sourceUrl))
+      }
+    }
+  }
+  
+  const maskAssets = assetsState.assets.filter(asset => asset.type === 'mask')
+  for (const mask of maskAssets) {
+    if (!mask?.url && (!mask.maskFrames || mask.maskFrames.length === 0)) continue
+    if (!maskElements.has(mask.id)) {
+      const images = new Map()
+      if (mask.maskFrames?.length) {
+        for (const frame of mask.maskFrames) {
+          if (frame.url && !images.has(frame.url)) {
+            images.set(frame.url, await loadImage(frame.url))
+          }
+        }
+      } else if (mask.url) {
+        images.set(mask.url, await loadImage(mask.url))
+      }
+      maskElements.set(mask.id, images)
+    }
+  }
+  
+  onProgress({ status: EXPORT_STATUS.rendering, progress: 5 })
+  
+  const frameDuration = fps > 0 ? 1 / fps : 0
+  const halfFrame = frameDuration / 2
+
+  for (let frameIndex = 0; frameIndex < totalFrames; frameIndex++) {
+    const targetTime = rangeStart + frameIndex * frameDuration + halfFrame
+    const safeEnd = Math.max(rangeStart, rangeEnd - halfFrame)
+    const time = Math.min(targetTime, safeEnd)
+    const transitionInfo = timelineState.getTransitionAtTime(time)
+    
+    ctx.fillStyle = '#000000'
+    ctx.fillRect(0, 0, width, height)
+    
+    const activeClips = timelineState.getActiveClipsAtTime(time)
+    const videoLayerClips = activeClips
+      .filter(({ track }) => track.type === 'video')
+      .sort((a, b) => {
+        const indexA = timelineState.tracks.findIndex(t => t.id === a.track.id)
+        const indexB = timelineState.tracks.findIndex(t => t.id === b.track.id)
+        return indexB - indexA
+      })
+    
+    for (const { clip } of videoLayerClips) {
+      const isVideoA = transitionInfo?.clipA?.id === clip.id || (transitionInfo?.clip?.id === clip.id && transitionInfo?.edge === 'out')
+      const isVideoB = transitionInfo?.clipB?.id === clip.id || (transitionInfo?.clip?.id === clip.id && transitionInfo?.edge === 'in')
+      const transitionStyle = (isVideoA || isVideoB) ? getTransitionCanvasStyle(transitionInfo, isVideoA) : null
+      
+      const clipTransform = clip.transform || {}
+      const asset = assetsState.getAssetById(clip.assetId)
+      const cachedSourceUrl = cachedVideoSources.get(clip.id)
+      const usingCachedRender = !!cachedSourceUrl
+      const maskEffect = (!usingCachedRender && (clip.effects || []).find(effect => effect.type === 'mask' && effect.enabled))
+      
+      let sourceWidth = width
+      let sourceHeight = height
+      let drawSource = null
+      let videoElement = null
+      let sourceFps = null
+      let maxSourceTime = null
+      let sourceTime = null
+      let shouldBlend = false
+      
+      if (clip.type === 'video') {
+        const sourceUrl = cachedSourceUrl || asset?.url
+        const video = sourceUrl ? videoElements.get(sourceUrl) : null
+        if (!video) continue
+        
+        // Calculate source time matching preview logic
+        const clipTime = time - clip.startTime
+        const timeScale = clip.sourceTimeScale || (clip.timelineFps && clip.sourceFps
+          ? clip.timelineFps / clip.sourceFps
+          : 1)
+        const rawSourceTime = usingCachedRender
+          ? clipTime
+          : (clip.trimStart || 0) + clipTime * timeScale
+        
+        // Clamp to valid range (matching VideoLayerRenderer behavior)
+        maxSourceTime = usingCachedRender 
+          ? clip.duration 
+          : (clip.sourceDuration || clip.trimEnd || video.duration || (clip.duration * timeScale))
+        const clampedSourceTime = Math.max(0, Math.min(rawSourceTime, maxSourceTime - 0.001))
+        sourceTime = clampedSourceTime
+        videoElement = video
+        const assetFps = Number(asset?.settings?.fps)
+        sourceFps = Number.isFinite(assetFps) && assetFps > 0 ? assetFps : null
+
+        shouldBlend = !!(sourceFps && sourceFps < fps - 0.5 && !maskEffect)
+        if (!shouldBlend) {
+          await seekVideo(video, clampedSourceTime, fastSeek)
+        }
+        sourceWidth = video.videoWidth || sourceWidth
+        sourceHeight = video.videoHeight || sourceHeight
+        drawSource = video
+      } else if (clip.type === 'image') {
+        const image = asset?.url ? imageElements.get(asset.url) : null
+        if (!image) continue
+        sourceWidth = image.naturalWidth || sourceWidth
+        sourceHeight = image.naturalHeight || sourceHeight
+        drawSource = image
+      }
+      
+      if (!drawSource) continue
+      
+      const rect = getBaseDrawRect(sourceWidth, sourceHeight, width, height)
+      const baseOpacity = typeof clipTransform.opacity === 'number' ? clipTransform.opacity / 100 : 1
+      const clipOpacity = (transitionStyle?.opacity ?? 1) * baseOpacity
+      
+      ctx.save()
+      ctx.globalAlpha = clipOpacity
+      ctx.filter = transitionStyle?.blur ? `blur(${transitionStyle.blur}px)` : 'none'
+      
+      applyClipTransform(ctx, rect, clipTransform, transitionStyle)
+      applyClipCrop(ctx, rect, clipTransform)
+      applyTransitionClip(ctx, rect, transitionStyle)
+      
+      if (shouldBlend && sourceTime !== null) {
+        const sourceFrameDuration = 1 / sourceFps
+        const baseIndex = Math.floor(sourceTime / sourceFrameDuration)
+        const baseTime = baseIndex * sourceFrameDuration
+        const nextTime = Math.min(baseTime + sourceFrameDuration, (maxSourceTime ?? sourceTime) - 0.001)
+        const blend = clamp((sourceTime - baseTime) / sourceFrameDuration, 0, 1)
+
+        ctx.globalAlpha = clipOpacity * (1 - blend)
+        await seekVideo(videoElement, baseTime, fastSeek)
+        ctx.drawImage(videoElement, 0, 0, rect.width, rect.height)
+
+        if (blend > 0.001 && nextTime > baseTime + 1e-6) {
+          ctx.globalAlpha = clipOpacity * blend
+          await seekVideo(videoElement, nextTime, fastSeek)
+          ctx.drawImage(videoElement, 0, 0, rect.width, rect.height)
+        }
+
+        ctx.restore()
+        continue
+      }
+      if (maskEffect) {
+        const maskAsset = assetsState.getAssetById(maskEffect.maskAssetId)
+        const maskFrameUrl = getMaskFrameInfo(clip, maskAsset, time)
+        const maskImageMap = maskElements.get(maskAsset?.id)
+        const maskImage = maskImageMap?.get(maskFrameUrl)
+        
+        if (maskImage) {
+          let buffers = maskRenderBuffers.get(clip.id)
+          if (!buffers) {
+            const offCanvas = document.createElement('canvas')
+            offCanvas.width = width
+            offCanvas.height = height
+            const offCtx = offCanvas.getContext('2d')
+            const maskCanvas = document.createElement('canvas')
+            maskCanvas.width = width
+            maskCanvas.height = height
+            const maskCtx = maskCanvas.getContext('2d')
+            buffers = { offCanvas, offCtx, maskCanvas, maskCtx }
+            maskRenderBuffers.set(clip.id, buffers)
+          }
+          const { offCanvas, offCtx, maskCanvas, maskCtx } = buffers
+          
+          offCtx.clearRect(0, 0, width, height)
+          offCtx.save()
+          offCtx.globalAlpha = clipOpacity
+          offCtx.filter = transitionStyle?.blur ? `blur(${transitionStyle.blur}px)` : 'none'
+          applyClipTransform(offCtx, rect, clipTransform, transitionStyle)
+          applyClipCrop(offCtx, rect, clipTransform)
+          applyTransitionClip(offCtx, rect, transitionStyle)
+          offCtx.drawImage(drawSource, 0, 0, rect.width, rect.height)
+          offCtx.restore()
+          
+          maskCtx.clearRect(0, 0, width, height)
+          maskCtx.save()
+          maskCtx.filter = transitionStyle?.blur ? `blur(${transitionStyle.blur}px)` : 'none'
+          applyClipTransform(maskCtx, rect, clipTransform, transitionStyle)
+          applyClipCrop(maskCtx, rect, clipTransform)
+          applyTransitionClip(maskCtx, rect, transitionStyle)
+          maskCtx.drawImage(maskImage, 0, 0, rect.width, rect.height)
+          maskCtx.restore()
+          
+          const frameData = offCtx.getImageData(0, 0, width, height)
+          const maskData = maskCtx.getImageData(0, 0, width, height)
+          const framePixels = frameData.data
+          const maskPixels = maskData.data
+          
+          for (let i = 0; i < framePixels.length; i += 4) {
+            const luminance = (maskPixels[i] + maskPixels[i + 1] + maskPixels[i + 2]) / 3
+            const alpha = maskEffect.invertMask ? (255 - luminance) : luminance
+            framePixels[i + 3] = alpha
+          }
+          
+          offCtx.putImageData(frameData, 0, 0)
+          
+          ctx.drawImage(offCanvas, 0, 0)
+          ctx.restore()
+          continue
+        }
+      }
+      
+      ctx.drawImage(drawSource, 0, 0, rect.width, rect.height)
+      ctx.restore()
+    }
+    
+    for (const { clip } of activeClips.filter(({ clip }) => clip.type === 'text')) {
+      const rect = getBaseDrawRect(width, height, width, height)
+      const baseOpacity = typeof clip.transform?.opacity === 'number' ? clip.transform.opacity / 100 : 1
+      ctx.save()
+      ctx.globalAlpha = baseOpacity
+      applyClipTransform(ctx, rect, clip.transform || {}, null)
+      drawText(ctx, rect, clip)
+      ctx.restore()
+    }
+    
+    const overlayOpacity = getFadeOverlayOpacity(transitionInfo)
+    if (overlayOpacity !== null) {
+      const type = transitionInfo?.transition?.type
+      ctx.save()
+      ctx.globalAlpha = overlayOpacity
+      ctx.fillStyle = type === 'fade-white' ? '#FFFFFF' : '#000000'
+      ctx.fillRect(0, 0, width, height)
+      ctx.restore()
+    }
+    
+    const frameBlob = await new Promise(resolve => canvas.toBlob(resolve, 'image/png'))
+    const frameBuffer = await frameBlob.arrayBuffer()
+    const framePath = await window.electronAPI.pathJoin(framesFolder, `frame_${formatFrameNumber(frameIndex + 1)}.png`)
+    await window.electronAPI.writeFileFromArrayBuffer(framePath, frameBuffer)
+    
+    if (frameIndex % 5 === 0) {
+      const progress = 5 + Math.floor((frameIndex / totalFrames) * 70)
+      onProgress({ 
+        status: EXPORT_STATUS.rendering, 
+        progress,
+        frame: frameIndex + 1,
+        totalFrames
+      })
+    }
+  }
+  
+  let audioFilePath = null
+  if (includeAudio) {
+    onProgress({ status: EXPORT_STATUS.audio, progress: 80 })
+    const audioClips = timelineState.clips.filter(clip => clip.type === 'audio')
+    const activeTracks = timelineState.tracks.filter(t => t.type === 'audio' && t.visible && !t.muted)
+    
+    if (audioClips.length > 0 && activeTracks.length > 0) {
+      const sampleRate = audioSampleRate || DEFAULT_SAMPLE_RATE
+      const totalSamples = Math.ceil(totalDuration * sampleRate)
+      const channelCount = audioChannels || 2
+      const offlineContext = new OfflineAudioContext(channelCount, totalSamples, sampleRate)
+      
+      for (const clip of audioClips) {
+        const track = timelineState.tracks.find(t => t.id === clip.trackId)
+        if (!track || track.muted || !track.visible) continue
+        const asset = assetsState.getAssetById(clip.assetId)
+        if (!asset?.url) continue
+        
+        try {
+          const response = await fetch(asset.url)
+          const arrayBuffer = await response.arrayBuffer()
+          const audioBuffer = await offlineContext.decodeAudioData(arrayBuffer)
+          
+          const source = offlineContext.createBufferSource()
+          source.buffer = audioBuffer
+          
+          const startOffset = Math.max(0, clip.startTime - rangeStart)
+          const sourceOffset = clip.trimStart || 0
+          const playDuration = clamp(clip.duration, 0, audioBuffer.duration - sourceOffset)
+          
+          source.connect(offlineContext.destination)
+          source.start(startOffset, sourceOffset, playDuration)
+        } catch (err) {
+          console.warn('Failed to decode audio clip for export:', err)
+        }
+      }
+      
+      const mixedBuffer = await offlineContext.startRendering()
+      const wavData = audioBufferToWav(mixedBuffer)
+      await window.electronAPI.writeFileFromArrayBuffer(audioPath, wavData)
+      audioFilePath = audioPath
+    }
+  }
+  
+  onProgress({ status: EXPORT_STATUS.encoding, progress: 90 })
+  
+  const encodeResult = await window.electronAPI.encodeVideo({
+    framePattern,
+    fps,
+    outputPath,
+    audioPath: audioFilePath,
+    format: outputExtension,
+    duration: totalDuration,
+    videoCodec,
+    audioCodec,
+    useHardwareEncoder,
+    nvencPreset,
+    preset,
+    qualityMode,
+    crf,
+    bitrateKbps,
+    keyframeInterval,
+    audioBitrateKbps,
+    audioSampleRate,
+  })
+  
+  if (!encodeResult?.success) {
+    throw new Error(encodeResult?.error || 'Failed to encode export.')
+  }
+  if (encodeResult.encoderUsed) {
+    console.log(`Export encoded with: ${encodeResult.encoderUsed}`)
+  }
+
+  // Cleanup temp render files
+  try {
+    await window.electronAPI.deleteDirectory(tempFolder, { recursive: true })
+  } catch (err) {
+    console.warn('Failed to clean export temp folder:', err)
+  }
+  
+  onProgress({ status: EXPORT_STATUS.done, progress: 100 })
+  
+  return {
+    outputPath,
+    encoderUsed: encodeResult.encoderUsed || null,
+  }
+}
+
+export default exportTimeline

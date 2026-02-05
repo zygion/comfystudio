@@ -32,6 +32,10 @@ function AssetsPanel() {
   
   // Mask generation state
   const [maskDialogAsset, setMaskDialogAsset] = useState(null) // Asset to generate mask for
+  
+  // Selected asset tracking (for keyboard delete)
+  const [selectedAssetId, setSelectedAssetId] = useState(null)
+  const panelRef = useRef(null)
 
   // Get assets from store
   const { 
@@ -104,6 +108,7 @@ function AssetsPanel() {
           folderId: currentFolderId, // Add to current folder
           settings: {
             duration: assetInfo.duration,
+            fps: assetInfo.fps,
           },
         })
         
@@ -266,8 +271,32 @@ function AssetsPanel() {
     if (timelineIsPlaying) {
       timelineTogglePlay()
     }
+    setSelectedAssetId(asset.id)
     setPreview(asset)
   }
+  
+  // Keyboard handler for Delete/Backspace
+  useEffect(() => {
+    const handleKeyDown = (e) => {
+      // Only handle if this panel is focused (or a child is)
+      if (!panelRef.current?.contains(document.activeElement) && document.activeElement !== panelRef.current) return
+      // Don't handle if editing a name or typing in an input
+      if (editingId || document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') return
+      
+      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedAssetId) {
+        e.preventDefault()
+        e.stopPropagation()
+        if (confirm('Delete this asset?')) {
+          const deletedId = selectedAssetId
+          removeAsset(deletedId)
+          setSelectedAssetId(null)
+        }
+      }
+    }
+    
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [selectedAssetId, editingId, removeAsset])
   
   // Handle folder click
   const handleFolderClick = (folderId) => {
@@ -344,7 +373,9 @@ function AssetsPanel() {
 
   return (
     <div 
-      className={`h-full flex flex-col ${isDragOver ? 'ring-2 ring-sf-accent ring-inset' : ''}`}
+      ref={panelRef}
+      tabIndex={-1}
+      className={`h-full flex flex-col outline-none ${isDragOver ? 'ring-2 ring-sf-accent ring-inset' : ''}`}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
@@ -503,9 +534,17 @@ function AssetsPanel() {
       )}
       
       {/* Assets Grid/List */}
-      <div className="flex-1 p-2 overflow-auto relative">
+      <div 
+        className="flex-1 p-2 overflow-auto relative"
+        onDoubleClick={(e) => {
+          // Double-click on empty area triggers import
+          if (e.target === e.currentTarget || e.target.closest('.empty-state-container')) {
+            openFilePicker()
+          }
+        }}
+      >
         {filteredAssets.length === 0 && subFolders.length === 0 ? (
-          <div className="h-full flex flex-col items-center justify-center text-sf-text-muted">
+          <div className="empty-state-container h-full flex flex-col items-center justify-center text-sf-text-muted">
             <Video className="w-10 h-10 mb-2 opacity-50" />
             <p className="text-xs">No assets yet</p>
             <p className="text-[10px] mt-1">Generate AI videos or import your footage</p>
@@ -528,7 +567,16 @@ function AssetsPanel() {
             </div>
           </div>
         ) : viewMode === 'grid' ? (
-          <div className={`grid gap-2`} style={{ gridTemplateColumns: `repeat(${sizeConfig.cols}, minmax(0, 1fr))` }}>
+          <div 
+            className={`grid gap-2`} 
+            style={{ gridTemplateColumns: `repeat(${sizeConfig.cols}, minmax(0, 1fr))` }}
+            onDoubleClick={(e) => {
+              // Double-click on empty grid area triggers import
+              if (e.target === e.currentTarget) {
+                openFilePicker()
+              }
+            }}
+          >
             {/* Back button if in a folder */}
             {currentFolderId && (
               <button
@@ -566,7 +614,7 @@ function AssetsPanel() {
             {/* Assets */}
             {filteredAssets.map((asset) => {
               const Icon = getIcon(asset.type)
-              const isSelected = currentPreview?.id === asset.id
+              const isSelected = selectedAssetId === asset.id || currentPreview?.id === asset.id
               
               return (
                 <div
@@ -697,7 +745,15 @@ function AssetsPanel() {
           </div>
         ) : (
           /* List View */
-          <div className="space-y-1">
+          <div 
+            className="space-y-1"
+            onDoubleClick={(e) => {
+              // Double-click on empty list area triggers import
+              if (e.target === e.currentTarget) {
+                openFilePicker()
+              }
+            }}
+          >
             {/* Back button if in a folder */}
             {currentFolderId && (
               <button
@@ -738,7 +794,7 @@ function AssetsPanel() {
             {/* Assets */}
             {filteredAssets.map((asset) => {
               const Icon = getIcon(asset.type)
-              const isSelected = currentPreview?.id === asset.id
+              const isSelected = selectedAssetId === asset.id || currentPreview?.id === asset.id
               
               return (
                 <div 

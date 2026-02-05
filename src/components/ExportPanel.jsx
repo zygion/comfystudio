@@ -1,0 +1,1040 @@
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Download, Plus, Trash2, Play, Settings, Film, Clock } from 'lucide-react'
+import useProjectStore, { RESOLUTION_PRESETS, FPS_PRESETS } from '../stores/projectStore'
+import useTimelineStore from '../stores/timelineStore'
+import exportTimeline from '../services/exporter'
+
+const EXPORT_FORMATS = [
+  { id: 'mp4', label: 'MP4 (H.264/H.265)' },
+  { id: 'webm', label: 'WebM (VP9)' },
+  { id: 'gif', label: 'GIF (Preview - Soon)', disabled: true },
+  { id: 'png-seq', label: 'PNG Sequence - Soon', disabled: true },
+]
+
+const RANGE_PRESETS = [
+  { id: 'full', label: 'Full Timeline' },
+  { id: 'inout', label: 'In/Out Range' },
+  { id: 'selection', label: 'Selection' },
+]
+
+const VIDEO_CODECS = {
+  mp4: [
+    { id: 'h264', label: 'H.264' },
+    { id: 'h265', label: 'H.265' },
+  ],
+  webm: [
+    { id: 'vp9', label: 'VP9' },
+  ],
+}
+
+const AUDIO_CODECS = {
+  mp4: [
+    { id: 'aac', label: 'AAC' },
+  ],
+  webm: [
+    { id: 'opus', label: 'Opus' },
+  ],
+}
+
+const ENCODER_PRESETS = [
+  { id: 'ultrafast', label: 'Ultra Fast' },
+  { id: 'superfast', label: 'Super Fast' },
+  { id: 'veryfast', label: 'Very Fast' },
+  { id: 'faster', label: 'Faster' },
+  { id: 'fast', label: 'Fast' },
+  { id: 'medium', label: 'Medium' },
+  { id: 'slow', label: 'Slow' },
+  { id: 'slower', label: 'Slower' },
+  { id: 'veryslow', label: 'Very Slow' },
+]
+
+const QUALITY_MODES = [
+  { id: 'crf', label: 'Automatic (CRF)' },
+  { id: 'bitrate', label: 'Restrict to bitrate' },
+]
+
+const KEYFRAME_MODES = [
+  { id: 'auto', label: 'Automatic' },
+  { id: 'manual', label: 'Every' },
+]
+
+const NVENC_PRESETS = [
+  { id: 'p1', label: 'P1 (Fastest)' },
+  { id: 'p2', label: 'P2' },
+  { id: 'p3', label: 'P3' },
+  { id: 'p4', label: 'P4' },
+  { id: 'p5', label: 'P5 (Balanced)' },
+  { id: 'p6', label: 'P6' },
+  { id: 'p7', label: 'P7 (Best Quality)' },
+]
+
+const AUDIO_SAMPLE_RATES = [
+  { id: 44100, label: '44.1 kHz' },
+  { id: 48000, label: '48 kHz' },
+]
+
+const AUDIO_CHANNELS = [
+  { id: 2, label: 'Stereo' },
+  { id: 1, label: 'Mono' },
+]
+
+const DEFAULT_CRF = {
+  h264: 18,
+  h265: 20,
+  vp9: 32,
+}
+
+function ExportPanel() {
+  const { currentProject, getCurrentTimelineSettings } = useProjectStore()
+  const { duration, inPoint, outPoint, getTimelineEndTime, selectedClipIds, clips, transitions, tracks } = useTimelineStore()
+  
+  const projectName = currentProject?.name || 'Untitled'
+  const defaultFilename = `${projectName}_export`
+  
+  const [settings, setSettings] = useState({
+    filename: defaultFilename,
+    format: 'mp4',
+    videoCodec: 'h264',
+    audioCodec: 'aac',
+    useHardwareEncoder: false,
+    nvencPreset: 'p5',
+    preset: 'medium',
+    qualityMode: 'crf',
+    crf: DEFAULT_CRF.h264,
+    bitrateKbps: 8000,
+    keyframeMode: 'auto',
+    keyframeInterval: 48,
+    resolution: 'project',
+    fps: 'project',
+    range: 'full',
+    renderMode: 'single',
+    includeAudio: true,
+    audioBitrateKbps: 192,
+    audioSampleRate: 44100,
+    audioChannels: 2,
+    useCachedRenders: false,
+    fastSeek: false,
+  })
+  const [queue, setQueue] = useState([])
+  const [isExporting, setIsExporting] = useState(false)
+  const [exportStatus, setExportStatus] = useState('')
+  const [exportProgress, setExportProgress] = useState(0)
+  const [exportError, setExportError] = useState(null)
+  const [exportResult, setExportResult] = useState(null)
+  const [activeSection, setActiveSection] = useState('video')
+  const [etaSeconds, setEtaSeconds] = useState(null)
+  const [renderFps, setRenderFps] = useState(null)
+  const exportStartRef = useRef(null)
+  const renderStartRef = useRef(null)
+  const [nvencStatus, setNvencStatus] = useState({
+    checked: false,
+    available: false,
+    h264: false,
+    h265: false,
+    error: null,
+  })
+  const [queueRunning, setQueueRunning] = useState(false)
+  const [queuePaused, setQueuePaused] = useState(false)
+  const [queuePauseRequested, setQueuePauseRequested] = useState(false)
+  const queueRef = useRef([])
+  const queueControllerRef = useRef({ running: false, paused: false })
+
+  useEffect(() => {
+    queueRef.current = queue
+  }, [queue])
+
+  useEffect(() => {
+    let cancelled = false
+    
+    const checkNvenc = async () => {
+      if (!window.electronAPI?.checkNvenc) {
+        setNvencStatus({ checked: true, available: false, h264: false, h265: false, error: 'NVENC check unavailable' })
+        return
+      }
+      try {
+        const result = await window.electronAPI.checkNvenc()
+        if (cancelled) return
+        setNvencStatus({
+          checked: true,
+          available: !!result.available,
+          h264: !!result.h264,
+          h265: !!result.h265,
+          error: result.error || null,
+        })
+      } catch (err) {
+        if (cancelled) return
+        setNvencStatus({
+          checked: true,
+          available: false,
+          h264: false,
+          h265: false,
+          error: err.message,
+        })
+      }
+    }
+    
+    checkNvenc()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+  
+  const timelineRangeLabel = useMemo(() => {
+    if (settings.range === 'inout' && inPoint !== null && outPoint !== null) {
+      return `${Math.max(0, inPoint).toFixed(2)}s → ${Math.max(inPoint, outPoint).toFixed(2)}s`
+    }
+    if (settings.range === 'selection') {
+      return 'Current selection'
+    }
+    return `0s → ${duration.toFixed(2)}s`
+  }, [settings.range, inPoint, outPoint, duration])
+  
+  const handleSettingChange = (key, value) => {
+    setSettings((prev) => {
+      const next = { ...prev, [key]: value }
+      
+      if (key === 'format') {
+        const supportedVideo = VIDEO_CODECS[value] || []
+        const supportedAudio = AUDIO_CODECS[value] || []
+        next.videoCodec = supportedVideo[0]?.id || prev.videoCodec
+        next.audioCodec = supportedAudio[0]?.id || prev.audioCodec
+        if (next.videoCodec && DEFAULT_CRF[next.videoCodec]) {
+          next.crf = DEFAULT_CRF[next.videoCodec]
+        }
+        if (value === 'webm') {
+          next.useHardwareEncoder = false
+        }
+      }
+      
+      if (key === 'videoCodec') {
+        if (DEFAULT_CRF[value]) {
+          next.crf = DEFAULT_CRF[value]
+        }
+        if (value === 'vp9') {
+          next.format = 'webm'
+          next.useHardwareEncoder = false
+        } else {
+          next.format = 'mp4'
+        }
+        const supportedAudio = AUDIO_CODECS[next.format] || []
+        if (!supportedAudio.find(codec => codec.id === next.audioCodec)) {
+          next.audioCodec = supportedAudio[0]?.id || next.audioCodec
+        }
+      }
+      
+      return next
+    })
+  }
+  
+  const handleAddToQueue = () => {
+    const queuedItem = {
+      id: `export-${Date.now()}`,
+      name: settings.filename.trim() || defaultFilename,
+      createdAt: new Date().toISOString(),
+      status: 'queued',
+      settings: { ...settings },
+    }
+    setQueue((prev) => [queuedItem, ...prev])
+  }
+  
+  const handleRemoveFromQueue = (id) => {
+    setQueue((prev) => prev.filter((item) => item.id !== id))
+  }
+  
+  const handleClearQueue = () => {
+    setQueue([])
+  }
+
+  const updateQueueItem = (id, updates) => {
+    setQueue((prev) => prev.map(item => item.id === id ? { ...item, ...updates } : item))
+  }
+
+  const runQueue = async () => {
+    if (queueControllerRef.current.running) return
+    queueControllerRef.current.running = true
+    queueControllerRef.current.paused = false
+    setQueueRunning(true)
+    setQueuePaused(false)
+    setQueuePauseRequested(false)
+    
+    try {
+      while (true) {
+        if (queueControllerRef.current.paused) break
+        const nextItem = queueRef.current.find(item => item.status === 'queued')
+        if (!nextItem) break
+        
+        updateQueueItem(nextItem.id, { status: 'rendering', startedAt: new Date().toISOString() })
+        
+        try {
+          await runExportJob(nextItem.settings, `Queue: ${nextItem.name}`)
+          updateQueueItem(nextItem.id, { status: 'completed', completedAt: new Date().toISOString() })
+        } catch (err) {
+          updateQueueItem(nextItem.id, { status: 'failed', error: err.message || 'Export failed' })
+        }
+      }
+    } finally {
+      queueControllerRef.current.running = false
+      setQueueRunning(false)
+      setQueuePaused(queueControllerRef.current.paused)
+      setQueuePauseRequested(false)
+    }
+  }
+
+  const handleStartQueue = () => {
+    if (queueRunning || queueRef.current.length === 0) return
+    runQueue()
+  }
+
+  const handlePauseQueue = () => {
+    if (!queueRunning) return
+    queueControllerRef.current.paused = true
+    setQueuePauseRequested(true)
+  }
+
+  const handleResumeQueue = () => {
+    if (queueRunning) return
+    queueControllerRef.current.paused = false
+    setQueuePaused(false)
+    setQueuePauseRequested(false)
+    runQueue()
+  }
+
+  const resolveResolution = () => {
+    if (settings.resolution === 'project') {
+      return getCurrentTimelineSettings() || { width: 1920, height: 1080, fps: 24 }
+    }
+    const preset = RESOLUTION_PRESETS.find(p => p.name === settings.resolution)
+    if (preset) {
+      return { width: preset.width, height: preset.height, fps: getCurrentTimelineSettings()?.fps || 24 }
+    }
+    return getCurrentTimelineSettings() || { width: 1920, height: 1080, fps: 24 }
+  }
+
+  const resolveFps = () => {
+    if (settings.fps === 'project') {
+      return getCurrentTimelineSettings()?.fps || 24
+    }
+    return Number(settings.fps) || 24
+  }
+
+  const resolveRange = () => {
+    if (settings.range === 'inout' && inPoint !== null && outPoint !== null) {
+      return { start: Math.min(inPoint, outPoint), end: Math.max(inPoint, outPoint) }
+    }
+    if (settings.range === 'selection' && selectedClipIds.length > 0) {
+      const selected = clips.filter(c => selectedClipIds.includes(c.id))
+      const start = Math.min(...selected.map(c => c.startTime))
+      const end = Math.max(...selected.map(c => c.startTime + c.duration))
+      return { start, end }
+    }
+    return { start: 0, end: getTimelineEndTime() }
+  }
+
+  const formatDuration = (seconds) => {
+    if (seconds === null || Number.isNaN(seconds)) return '--:--'
+    const clamped = Math.max(0, Math.round(seconds))
+    const minutes = Math.floor(clamped / 60)
+    const secs = clamped % 60
+    return `${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+  }
+
+  const performanceHints = useMemo(() => {
+    const hints = []
+    const timelineSettings = getCurrentTimelineSettings() || { width: 1920, height: 1080, fps: 24 }
+    const resolution = settings.resolution === 'project'
+      ? timelineSettings
+      : RESOLUTION_PRESETS.find(p => p.name === settings.resolution) || timelineSettings
+    const effectiveFps = settings.fps === 'project' ? timelineSettings.fps : Number(settings.fps || timelineSettings.fps)
+    const pixelCount = (resolution.width || 1920) * (resolution.height || 1080)
+    
+    if (pixelCount >= 3840 * 2160) {
+      hints.push('4K exports are heavy. Consider proxies or lower resolution for previews.')
+    }
+    if (effectiveFps >= 60) {
+      hints.push('60fps export doubles frame workload. Lower FPS for faster renders.')
+    }
+    if (!settings.useHardwareEncoder && settings.format === 'mp4' && settings.videoCodec !== 'vp9') {
+      hints.push('Enable NVIDIA NVENC to speed up encoding on RTX GPUs.')
+    }
+    if (nvencStatus.checked && !nvencStatus.available) {
+      hints.push('NVENC not detected in your FFmpeg build. GPU encoding will be unavailable.')
+    }
+    if (settings.format === 'webm' || settings.videoCodec === 'vp9') {
+      hints.push('VP9/WebM encodes slower than H.264/H.265.')
+    }
+    
+    const maskClips = clips.filter(clip => (clip.effects || []).some(effect => effect.type === 'mask' && effect.enabled))
+    const cachedMaskClips = maskClips.filter(clip => clip.cacheStatus === 'cached')
+    if (maskClips.length > 0) {
+      if (!settings.useCachedRenders) {
+        hints.push('Use cached renders to speed up masked clips.')
+      } else if (cachedMaskClips.length < maskClips.length) {
+        hints.push(`${maskClips.length - cachedMaskClips.length} masked clips are uncached. Render cache will speed exports.`)
+      }
+    }
+    
+    const textClips = clips.filter(clip => clip.type === 'text')
+    if (textClips.length > 0) {
+      hints.push('Text overlays add compositing work; expect longer renders.')
+    }
+    if (transitions.length > 0) {
+      hints.push('Transitions require dual-frame compositing and add export time.')
+    }
+    
+    const audioClips = clips.filter(clip => clip.type === 'audio')
+    const activeAudioTracks = tracks.filter(track => track.type === 'audio' && track.visible && !track.muted)
+    if (settings.includeAudio && audioClips.length > 0 && activeAudioTracks.length > 0) {
+      hints.push('Audio mixdown runs offline; long timelines increase export time.')
+    }
+    
+    return hints.slice(0, 5)
+  }, [clips, transitions, tracks, settings, getCurrentTimelineSettings, nvencStatus])
+
+  const runExportJob = async (jobSettings, labelOverride = null) => {
+    if (jobSettings.format === 'gif' || jobSettings.format === 'png-seq') {
+      throw new Error('GIF and PNG sequence export are not wired yet.')
+    }
+    if (jobSettings.useHardwareEncoder && nvencStatus.checked) {
+      const codecSupported = jobSettings.videoCodec === 'h265'
+        ? nvencStatus.h265
+        : nvencStatus.h264
+      if (!codecSupported) {
+        throw new Error('NVENC is not supported by your FFmpeg build.')
+      }
+    }
+    
+    exportStartRef.current = Date.now()
+    renderStartRef.current = null
+    setEtaSeconds(null)
+    setRenderFps(null)
+    setExportError(null)
+    setExportResult(null)
+    setIsExporting(true)
+    
+    const { width, height } = resolveResolution()
+    const fps = resolveFps()
+    const range = resolveRange()
+    
+    const result = await exportTimeline({
+      filename: jobSettings.filename?.trim() || defaultFilename,
+      format: jobSettings.format,
+      videoCodec: jobSettings.videoCodec,
+      audioCodec: jobSettings.audioCodec,
+      useHardwareEncoder: jobSettings.useHardwareEncoder,
+      nvencPreset: jobSettings.nvencPreset,
+      preset: jobSettings.preset,
+      qualityMode: jobSettings.qualityMode,
+      crf: Number(jobSettings.crf),
+      bitrateKbps: Number(jobSettings.bitrateKbps),
+      keyframeInterval: jobSettings.keyframeMode === 'auto' ? null : Number(jobSettings.keyframeInterval),
+      width,
+      height,
+      fps,
+      rangeStart: range.start,
+      rangeEnd: range.end,
+      includeAudio: jobSettings.includeAudio,
+      audioBitrateKbps: Number(jobSettings.audioBitrateKbps),
+      audioSampleRate: Number(jobSettings.audioSampleRate),
+      audioChannels: Number(jobSettings.audioChannels),
+      useCachedRenders: jobSettings.useCachedRenders,
+      fastSeek: jobSettings.fastSeek,
+    }, (progress) => {
+      setExportStatus(labelOverride ? `${labelOverride} • ${progress.status || ''}`.trim() : (progress.status || ''))
+      if (typeof progress.progress === 'number') {
+        setExportProgress(progress.progress)
+      }
+      if (exportStartRef.current) {
+        const now = Date.now()
+        if (progress.frame && progress.totalFrames) {
+          if (!renderStartRef.current) {
+            renderStartRef.current = now
+          }
+          const elapsed = (now - renderStartRef.current) / 1000
+          if (elapsed > 0) {
+            const fpsEstimate = progress.frame / elapsed
+            setRenderFps(fpsEstimate)
+            const remainingFrames = Math.max(0, progress.totalFrames - progress.frame)
+            setEtaSeconds(fpsEstimate > 0 ? remainingFrames / fpsEstimate : null)
+          }
+        } else if (typeof progress.progress === 'number' && progress.progress > 1) {
+          const elapsed = (now - exportStartRef.current) / 1000
+          const totalEstimate = elapsed / (progress.progress / 100)
+          setEtaSeconds(totalEstimate - elapsed)
+        }
+      }
+    })
+    
+    setExportResult(result)
+    setExportStatus('Export complete')
+    setExportProgress(100)
+    setIsExporting(false)
+    
+    return result
+  }
+
+  const handleStartExport = async () => {
+    if (isExporting || queueRunning) return
+    try {
+      await runExportJob(settings)
+    } catch (err) {
+      setExportError(err.message || 'Export failed')
+      setExportStatus('Export failed')
+      setIsExporting(false)
+    }
+  }
+  
+  return (
+    <div className="flex-1 flex flex-col min-w-0 bg-sf-dark-950">
+      {/* Header */}
+      <div className="h-12 flex items-center justify-between px-4 border-b border-sf-dark-700">
+        <div className="flex items-center gap-2">
+          <Download className="w-4 h-4 text-sf-accent" />
+          <span className="text-sm font-semibold text-sf-text-primary">Export</span>
+          <span className="text-[10px] text-sf-text-muted">Queue + settings ready</span>
+        </div>
+        <div className="text-[10px] text-sf-text-muted">
+          {isExporting ? exportStatus : 'Ready to export'}
+        </div>
+      </div>
+      
+      {/* Content */}
+      <div className="flex-1 min-h-0 grid grid-cols-12 gap-4 p-4">
+        {/* Settings */}
+        <div className="col-span-7 bg-sf-dark-900 border border-sf-dark-700 rounded-lg p-4">
+          <div className="flex items-center gap-2 mb-4">
+            <Settings className="w-4 h-4 text-sf-text-muted" />
+            <span className="text-xs font-semibold text-sf-text-primary uppercase tracking-wider">Export Settings</span>
+          </div>
+          
+          <div className="grid grid-cols-2 gap-4">
+            <div>
+              <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Filename</label>
+              <input
+                type="text"
+                value={settings.filename}
+                onChange={(e) => handleSettingChange('filename', e.target.value)}
+                className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                placeholder={defaultFilename}
+              />
+            </div>
+            
+            <div>
+              <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Format</label>
+              <select
+                value={settings.format}
+                onChange={(e) => handleSettingChange('format', e.target.value)}
+                className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+              >
+                {EXPORT_FORMATS.map((format) => (
+                  <option key={format.id} value={format.id} disabled={format.disabled}>{format.label}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+          
+          <div className="mt-3 flex items-center gap-2 text-[10px] text-sf-text-muted">
+            <span className="uppercase tracking-wider">Render</span>
+            <button
+              onClick={() => handleSettingChange('renderMode', 'single')}
+              className={`px-2 py-0.5 rounded border transition-colors ${
+                settings.renderMode === 'single'
+                  ? 'bg-sf-accent/20 text-sf-accent border-sf-accent/40'
+                  : 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600'
+              }`}
+            >
+              Single clip
+            </button>
+            <button
+              disabled
+              className="px-2 py-0.5 rounded border border-sf-dark-700 text-sf-text-muted/60 cursor-not-allowed"
+              title="Individual clips export is coming soon"
+            >
+              Individual clips
+            </button>
+          </div>
+          
+          <div className="mt-4 border-t border-sf-dark-700 pt-3">
+            <div className="flex items-center gap-2 mb-3">
+              {['video', 'audio', 'file'].map((section) => (
+                <button
+                  key={section}
+                  onClick={() => setActiveSection(section)}
+                  className={`px-3 py-1 text-xs rounded transition-colors ${
+                    activeSection === section
+                      ? 'bg-sf-accent text-white'
+                      : 'bg-sf-dark-800 text-sf-text-muted hover:text-sf-text-primary'
+                  }`}
+                >
+                  {section.charAt(0).toUpperCase() + section.slice(1)}
+                </button>
+              ))}
+            </div>
+            
+            {activeSection === 'video' && (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="col-span-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleSettingChange('useHardwareEncoder', !settings.useHardwareEncoder)}
+                      disabled={
+                        settings.videoCodec === 'vp9' ||
+                        settings.format === 'webm' ||
+                        (nvencStatus.checked && !nvencStatus.available) ||
+                        (settings.videoCodec === 'h265' && nvencStatus.checked && !nvencStatus.h265) ||
+                        (settings.videoCodec === 'h264' && nvencStatus.checked && !nvencStatus.h264)
+                      }
+                      className={`px-2 py-1 text-xs rounded border transition-colors ${
+                        settings.useHardwareEncoder
+                          ? 'bg-sf-accent text-white border-sf-accent'
+                          : 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600'
+                      } ${(settings.videoCodec === 'vp9' || settings.format === 'webm') ? 'opacity-50 cursor-not-allowed' : ''}`}
+                      title={nvencStatus.checked && !nvencStatus.available
+                        ? 'NVENC not available in your FFmpeg build'
+                        : 'Requires FFmpeg with NVIDIA NVENC support'}
+                    >
+                      Use NVIDIA NVENC
+                    </button>
+                    <span className="text-[10px] text-sf-text-muted">
+                      Hardware encoding (RTX 5090 friendly)
+                    </span>
+                  </div>
+                  {nvencStatus.checked && !nvencStatus.available && (
+                    <div className="mt-1 text-[10px] text-sf-warning">
+                      NVENC not detected in FFmpeg. Install an NVENC-enabled build to use GPU encoding.
+                    </div>
+                  )}
+                </div>
+                
+                <div>
+                  <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Video Codec</label>
+                  <select
+                    value={settings.videoCodec}
+                    onChange={(e) => handleSettingChange('videoCodec', e.target.value)}
+                    className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                  >
+                    {(VIDEO_CODECS[settings.format] || []).map((codec) => (
+                      <option key={codec.id} value={codec.id}>{codec.label}</option>
+                    ))}
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Encoder Preset</label>
+                  <select
+                    value={settings.preset}
+                    onChange={(e) => handleSettingChange('preset', e.target.value)}
+                    className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                  >
+                    {ENCODER_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>{preset.label}</option>
+                    ))}
+                  </select>
+                </div>
+
+                {settings.useHardwareEncoder && (
+                  <div>
+                    <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">NVENC Preset</label>
+                    <select
+                      value={settings.nvencPreset}
+                      onChange={(e) => handleSettingChange('nvencPreset', e.target.value)}
+                      className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                    >
+                      {NVENC_PRESETS.map((preset) => (
+                        <option key={preset.id} value={preset.id}>{preset.label}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+                
+                <div>
+                  <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Quality Mode</label>
+                  <select
+                    value={settings.qualityMode}
+                    onChange={(e) => handleSettingChange('qualityMode', e.target.value)}
+                    className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                  >
+                    {QUALITY_MODES.map((mode) => (
+                      <option key={mode.id} value={mode.id}>{mode.label}</option>
+                    ))}
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">
+                    {settings.qualityMode === 'crf' ? 'CRF' : 'Bitrate (kbps)'}
+                  </label>
+                  <input
+                    type="number"
+                    min={settings.qualityMode === 'crf' ? 0 : 100}
+                    max={settings.qualityMode === 'crf' ? 63 : 200000}
+                    value={settings.qualityMode === 'crf' ? settings.crf : settings.bitrateKbps}
+                    onChange={(e) => handleSettingChange(
+                      settings.qualityMode === 'crf' ? 'crf' : 'bitrateKbps',
+                      Number(e.target.value)
+                    )}
+                    className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                  />
+                </div>
+                
+                <div>
+                  <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Keyframes</label>
+                  <select
+                    value={settings.keyframeMode}
+                    onChange={(e) => handleSettingChange('keyframeMode', e.target.value)}
+                    className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                  >
+                    {KEYFRAME_MODES.map((mode) => (
+                      <option key={mode.id} value={mode.id}>{mode.label}</option>
+                    ))}
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Keyframe Interval</label>
+                  <input
+                    type="number"
+                    min={1}
+                    value={settings.keyframeInterval}
+                    onChange={(e) => handleSettingChange('keyframeInterval', Number(e.target.value))}
+                    disabled={settings.keyframeMode === 'auto'}
+                    className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary disabled:text-sf-text-muted disabled:opacity-60 focus:outline-none focus:border-sf-accent"
+                  />
+                </div>
+                
+                <div>
+                  <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Resolution</label>
+                  <select
+                    value={settings.resolution}
+                    onChange={(e) => handleSettingChange('resolution', e.target.value)}
+                    className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                  >
+                    <option value="project">Project Settings</option>
+                    {RESOLUTION_PRESETS.map((preset) => (
+                      <option key={preset.name} value={preset.name}>{preset.name}</option>
+                    ))}
+                  </select>
+                </div>
+                
+                <div>
+                  <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Frame Rate</label>
+                  <select
+                    value={settings.fps}
+                    onChange={(e) => handleSettingChange('fps', e.target.value)}
+                    className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                  >
+                    <option value="project">Project Settings</option>
+                    {FPS_PRESETS.map((preset) => (
+                      <option key={preset.value} value={preset.value}>{preset.label}</option>
+                    ))}
+                  </select>
+                </div>
+                
+                <div className="col-span-2">
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => handleSettingChange('useCachedRenders', !settings.useCachedRenders)}
+                      title="Use cached effect renders instead of re-compositing"
+                      className={`px-2 py-1 text-xs rounded border transition-colors ${
+                        settings.useCachedRenders
+                          ? 'bg-sf-accent/20 text-sf-accent border-sf-accent/40'
+                          : 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600'
+                      }`}
+                    >
+                      Use cached renders
+                    </button>
+                    <button
+                      onClick={() => handleSettingChange('fastSeek', !settings.fastSeek)}
+                      title="Fast seek jumps to keyframes for speed (less accurate)"
+                      className={`px-2 py-1 text-xs rounded border transition-colors ${
+                        settings.fastSeek
+                          ? 'bg-sf-accent/20 text-sf-accent border-sf-accent/40'
+                          : 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600'
+                      }`}
+                    >
+                      Fast seek (faster frame gen)
+                    </button>
+                  </div>
+                  <div className="mt-1 text-[10px] text-sf-text-muted">
+                    Cached renders reuse effect pre-renders. Fast seek trades accuracy for speed.
+                  </div>
+                </div>
+              </div>
+            )}
+            
+            {activeSection === 'audio' && (
+              <div className="grid grid-cols-2 gap-4">
+                <div className="col-span-2">
+                  <button
+                    onClick={() => handleSettingChange('includeAudio', !settings.includeAudio)}
+                    className={`px-2 py-1 text-xs rounded border transition-colors ${
+                      settings.includeAudio
+                        ? 'bg-sf-accent text-white border-sf-accent'
+                        : 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600'
+                    }`}
+                  >
+                    Include Audio
+                  </button>
+                </div>
+                
+                {settings.includeAudio ? (
+                  <>
+                    <div>
+                      <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Audio Codec</label>
+                      <select
+                        value={settings.audioCodec}
+                        onChange={(e) => handleSettingChange('audioCodec', e.target.value)}
+                        className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                      >
+                        {(AUDIO_CODECS[settings.format] || []).map((codec) => (
+                          <option key={codec.id} value={codec.id}>{codec.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    
+                    <div>
+                      <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Audio Bitrate (kbps)</label>
+                      <input
+                        type="number"
+                        min={32}
+                        max={512}
+                        value={settings.audioBitrateKbps}
+                        onChange={(e) => handleSettingChange('audioBitrateKbps', Number(e.target.value))}
+                        className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                      />
+                    </div>
+                    
+                    <div>
+                      <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Sample Rate</label>
+                      <select
+                        value={settings.audioSampleRate}
+                        onChange={(e) => handleSettingChange('audioSampleRate', Number(e.target.value))}
+                        className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                      >
+                        {AUDIO_SAMPLE_RATES.map((rate) => (
+                          <option key={rate.id} value={rate.id}>{rate.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                    
+                    <div>
+                      <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Channels</label>
+                      <select
+                        value={settings.audioChannels}
+                        onChange={(e) => handleSettingChange('audioChannels', Number(e.target.value))}
+                        className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                      >
+                        {AUDIO_CHANNELS.map((channel) => (
+                          <option key={channel.id} value={channel.id}>{channel.label}</option>
+                        ))}
+                      </select>
+                    </div>
+                  </>
+                ) : (
+                  <div className="col-span-2 text-[10px] text-sf-text-muted">
+                    Audio is disabled for this export.
+                  </div>
+                )}
+              </div>
+            )}
+            
+            {activeSection === 'file' && (
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="text-[10px] text-sf-text-muted uppercase tracking-wider">Range</label>
+                  <select
+                    value={settings.range}
+                    onChange={(e) => handleSettingChange('range', e.target.value)}
+                    className="mt-1 w-full bg-sf-dark-800 border border-sf-dark-600 rounded px-2 py-1 text-xs text-sf-text-primary focus:outline-none focus:border-sf-accent"
+                  >
+                    {RANGE_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>{preset.label}</option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-end">
+                  <p className="text-[10px] text-sf-text-muted flex items-center gap-1">
+                    <Clock className="w-3 h-3" /> {timelineRangeLabel}
+                  </p>
+                </div>
+                <div className="col-span-2 text-[10px] text-sf-text-muted">
+                  Output location will be chosen when export starts.
+                </div>
+              </div>
+            )}
+          </div>
+          
+          <div className="mt-4 flex items-center justify-end gap-2">
+            <button
+              onClick={handleAddToQueue}
+              className="px-3 py-1.5 text-xs rounded bg-sf-dark-700 text-sf-text-primary hover:bg-sf-dark-600 transition-colors flex items-center gap-1.5"
+            >
+              <Plus className="w-3 h-3" />
+              Add to Queue
+            </button>
+            <button
+              onClick={handleStartExport}
+              disabled={isExporting || queueRunning}
+              className={`px-3 py-1.5 text-xs rounded border flex items-center gap-1.5 transition-colors ${
+                isExporting || queueRunning
+                  ? 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600 cursor-not-allowed'
+                  : 'bg-sf-accent text-white border-sf-accent hover:bg-sf-accent-hover'
+              }`}
+            >
+              <Play className="w-3 h-3" />
+              {isExporting ? 'Exporting...' : (queueRunning ? 'Queue Running' : 'Start Export')}
+            </button>
+          </div>
+
+          {(isExporting || exportProgress > 0) && (
+            <div className="mt-4">
+              <div className="flex items-center justify-between text-[10px] text-sf-text-muted mb-1">
+                <span>{exportStatus || 'Exporting...'}</span>
+                <span>{Math.round(exportProgress)}% • ETA {formatDuration(etaSeconds)}</span>
+              </div>
+              <div className="h-1.5 bg-sf-dark-800 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-sf-accent transition-all"
+                  style={{ width: `${exportProgress}%` }}
+                />
+              </div>
+              {renderFps && (
+                <div className="mt-1 text-[10px] text-sf-text-muted">
+                  Render speed: {renderFps.toFixed(1)} fps
+                </div>
+              )}
+            </div>
+          )}
+          
+          {exportError && (
+            <div className="mt-3 text-[11px] text-sf-error">
+              {exportError}
+            </div>
+          )}
+          
+          {exportResult?.outputPath && !exportError && (
+            <div className="mt-3 text-[11px] text-sf-text-secondary">
+              Saved to: {exportResult.outputPath}
+              {exportResult.encoderUsed && (
+                <div>Encoder: {exportResult.encoderUsed}</div>
+              )}
+            </div>
+          )}
+          
+          {performanceHints.length > 0 && (
+            <div className="mt-4 border-t border-sf-dark-700 pt-3">
+              <div className="text-[10px] text-sf-text-muted uppercase tracking-wider mb-2">Performance hints</div>
+              <div className="space-y-1">
+                {performanceHints.map((hint) => (
+                  <div key={hint} className="text-[11px] text-sf-text-muted">
+                    • {hint}
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+        
+        {/* Queue */}
+        <div className="col-span-5 bg-sf-dark-900 border border-sf-dark-700 rounded-lg p-4 flex flex-col min-h-0">
+          <div className="flex items-center gap-2 mb-4">
+            <Film className="w-4 h-4 text-sf-text-muted" />
+            <span className="text-xs font-semibold text-sf-text-primary uppercase tracking-wider">Export Queue</span>
+            <span className="ml-auto text-[10px] text-sf-text-muted">
+              {queueRunning
+                ? (queuePauseRequested ? 'Pausing after current…' : 'Running')
+                : (queuePaused ? 'Paused' : 'Idle')}
+              {' '}• {queue.length} item{queue.length !== 1 ? 's' : ''}
+            </span>
+          </div>
+          
+          <div className="flex items-center gap-2 mb-3">
+            <button
+              onClick={handleStartQueue}
+              disabled={queueRunning || queue.length === 0}
+              className={`px-2 py-1 text-[11px] rounded border transition-colors ${
+                queueRunning || queue.length === 0
+                  ? 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600 cursor-not-allowed'
+                  : 'bg-sf-dark-700 text-sf-text-primary border-sf-dark-500 hover:bg-sf-dark-600'
+              }`}
+            >
+              Start Queue
+            </button>
+            <button
+              onClick={handlePauseQueue}
+              disabled={!queueRunning || queuePauseRequested}
+              className={`px-2 py-1 text-[11px] rounded border transition-colors ${
+                !queueRunning || queuePauseRequested
+                  ? 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600 cursor-not-allowed'
+                  : 'bg-sf-dark-700 text-sf-text-primary border-sf-dark-500 hover:bg-sf-dark-600'
+              }`}
+            >
+              Pause
+            </button>
+            <button
+              onClick={handleResumeQueue}
+              disabled={!queuePaused}
+              className={`px-2 py-1 text-[11px] rounded border transition-colors ${
+                queuePaused
+                  ? 'bg-sf-dark-700 text-sf-text-primary border-sf-dark-500 hover:bg-sf-dark-600'
+                  : 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600 cursor-not-allowed'
+              }`}
+            >
+              Resume
+            </button>
+          </div>
+          
+          <div className="flex-1 overflow-auto space-y-2">
+            {queue.length === 0 && (
+              <div className="text-center text-[11px] text-sf-text-muted py-8">
+                No exports queued yet
+              </div>
+            )}
+            {queue.map((item) => (
+              <div key={item.id} className="border border-sf-dark-700 rounded p-2 bg-sf-dark-800/60">
+                <div className="flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <div className="text-xs text-sf-text-primary truncate">{item.name}</div>
+                    <div className="text-[10px] text-sf-text-muted">
+                      {item.settings.format.toUpperCase()} • {item.settings.videoCodec?.toUpperCase()} • {item.settings.resolution} • {item.settings.fps} fps
+                    </div>
+                    <div className="text-[10px] text-sf-text-muted">
+                      Range: {item.settings.range}
+                    </div>
+                  </div>
+                  <button
+                    onClick={() => handleRemoveFromQueue(item.id)}
+                    className="p-1 hover:bg-sf-dark-700 rounded"
+                    title="Remove from queue"
+                  >
+                    <Trash2 className="w-3 h-3 text-sf-text-muted" />
+                  </button>
+                </div>
+                <div className="mt-2 text-[10px] text-sf-text-muted">
+                  Status: {item.status}
+                  {item.error ? ` • ${item.error}` : ''}
+                </div>
+              </div>
+            ))}
+          </div>
+          
+          {queue.length > 0 && (
+            <button
+              onClick={handleClearQueue}
+              disabled={queueRunning}
+              className={`mt-3 px-3 py-1.5 text-xs rounded border transition-colors flex items-center justify-center gap-1.5 ${
+                queueRunning
+                  ? 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600 cursor-not-allowed'
+                  : 'bg-sf-dark-800 text-sf-text-muted border-sf-dark-600 hover:text-sf-text-primary hover:border-sf-dark-500'
+              }`}
+            >
+              <Trash2 className="w-3 h-3" />
+              Clear Queue
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+export default ExportPanel

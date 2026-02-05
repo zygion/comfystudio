@@ -2,10 +2,46 @@ const { app, BrowserWindow, ipcMain, dialog, protocol, net } = require('electron
 const path = require('path')
 const fs = require('fs').promises
 const fsSync = require('fs')
+const { spawn } = require('child_process')
+const ffmpegPath = require('ffmpeg-static')
+const ffprobeStatic = require('ffprobe-static')
+const ffprobePath = ffprobeStatic?.path || ffprobeStatic
 
 const isDev = process.env.NODE_ENV !== 'production'
 
 let mainWindow = null
+
+// ============================================
+// Window Controls
+// ============================================
+
+ipcMain.handle('window:minimize', () => {
+  if (mainWindow) {
+    mainWindow.minimize()
+  }
+  return true
+})
+
+ipcMain.handle('window:toggleMaximize', () => {
+  if (!mainWindow) return false
+  if (mainWindow.isMaximized()) {
+    mainWindow.unmaximize()
+  } else {
+    mainWindow.maximize()
+  }
+  return true
+})
+
+ipcMain.handle('window:close', () => {
+  if (mainWindow) {
+    mainWindow.close()
+  }
+  return true
+})
+
+ipcMain.handle('window:isMaximized', () => {
+  return mainWindow ? mainWindow.isMaximized() : false
+})
 
 // Register custom protocol for serving local files
 function registerFileProtocol() {
@@ -384,6 +420,57 @@ ipcMain.handle('media:getFileUrlDirect', (event, filePath) => {
   return `file://${normalizedPath}`
 })
 
+ipcMain.handle('media:getVideoFps', async (event, filePath) => {
+  if (!ffprobePath) {
+    return { success: false, error: 'FFprobe binary not available.' }
+  }
+
+  const parseFps = (value) => {
+    if (!value || value === '0/0') return null
+    const [num, den] = String(value).split('/').map(Number)
+    if (!den || !num) return null
+    return num / den
+  }
+
+  return await new Promise((resolve) => {
+    const args = [
+      '-v', 'error',
+      '-select_streams', 'v:0',
+      '-show_entries', 'stream=avg_frame_rate,r_frame_rate',
+      '-of', 'json',
+      filePath
+    ]
+
+    const proc = spawn(ffprobePath, args, { windowsHide: true })
+    let stdout = ''
+    let stderr = ''
+
+    proc.stdout.on('data', (data) => {
+      stdout += data.toString()
+    })
+    proc.stderr.on('data', (data) => {
+      stderr += data.toString()
+    })
+    proc.on('error', (err) => {
+      resolve({ success: false, error: err.message })
+    })
+    proc.on('close', (code) => {
+      if (code !== 0) {
+        resolve({ success: false, error: stderr || `FFprobe exited with code ${code}` })
+        return
+      }
+      try {
+        const parsed = JSON.parse(stdout)
+        const stream = parsed?.streams?.[0]
+        const fps = parseFps(stream?.avg_frame_rate) || parseFps(stream?.r_frame_rate)
+        resolve({ success: !!fps, fps: fps || null })
+      } catch (err) {
+        resolve({ success: false, error: err.message })
+      }
+    })
+  })
+})
+
 // ============================================
 // IPC Handlers - App Settings Storage
 // ============================================
@@ -428,6 +515,204 @@ ipcMain.handle('settings:delete', async (event, key) => {
   } catch (err) {
     return { success: false, error: err.message }
   }
+})
+
+// ============================================
+// Export Operations
+// ============================================
+ipcMain.handle('export:encodeVideo', async (event, options = {}) => {
+  const {
+    framePattern,
+    fps = 24,
+    outputPath,
+    audioPath = null,
+    format = 'mp4',
+    duration = null,
+    videoCodec = 'h264',
+    audioCodec = 'aac',
+    useHardwareEncoder = false,
+    nvencPreset = 'p5',
+    preset = 'medium',
+    qualityMode = 'crf',
+    crf = 18,
+    bitrateKbps = 8000,
+    keyframeInterval = null,
+    audioBitrateKbps = 192,
+    audioSampleRate = 44100
+  } = options
+
+  if (!ffmpegPath) {
+    return { success: false, error: 'FFmpeg binary not available.' }
+  }
+  if (!framePattern || !outputPath) {
+    return { success: false, error: 'Missing export inputs.' }
+  }
+
+  let encoderUsed = null
+  const args = ['-y', '-framerate', String(fps), '-i', framePattern]
+  if (audioPath) {
+    args.push('-i', audioPath)
+  }
+  if (duration) {
+    args.push('-t', String(duration))
+  }
+
+  const normalizedCodec = format === 'webm' || videoCodec === 'vp9'
+    ? 'vp9'
+    : (videoCodec === 'h265' ? 'h265' : 'h264')
+
+  if (normalizedCodec === 'vp9') {
+    const vp9SpeedMap = {
+      ultrafast: 8,
+      superfast: 7,
+      veryfast: 6,
+      faster: 5,
+      fast: 4,
+      medium: 3,
+      slow: 2,
+      slower: 1,
+      veryslow: 0,
+    }
+    args.push(
+      '-c:v', 'libvpx-vp9',
+      '-pix_fmt', 'yuv420p',
+      '-row-mt', '1',
+      '-cpu-used', String(vp9SpeedMap[preset] ?? 3)
+    )
+    encoderUsed = 'libvpx-vp9'
+    if (qualityMode === 'bitrate') {
+      args.push('-b:v', `${bitrateKbps}k`)
+    } else {
+      args.push('-crf', String(crf), '-b:v', '0')
+    }
+  } else if (normalizedCodec === 'h265') {
+    if (useHardwareEncoder) {
+      args.push(
+        '-c:v', 'hevc_nvenc',
+        '-preset', nvencPreset,
+        '-pix_fmt', 'yuv420p',
+        '-rc', qualityMode === 'bitrate' ? 'vbr' : 'vbr'
+      )
+      encoderUsed = 'hevc_nvenc'
+      if (qualityMode === 'bitrate') {
+        args.push('-b:v', `${bitrateKbps}k`)
+      } else {
+        args.push('-cq', String(crf))
+      }
+    } else {
+      args.push(
+        '-c:v', 'libx265',
+        '-preset', preset,
+        '-pix_fmt', 'yuv420p'
+      )
+      encoderUsed = 'libx265'
+      if (qualityMode === 'bitrate') {
+        args.push('-b:v', `${bitrateKbps}k`)
+      } else {
+        args.push('-crf', String(crf))
+      }
+    }
+    args.push('-tag:v', 'hvc1')
+  } else {
+    // Default to H.264
+    if (useHardwareEncoder) {
+      args.push(
+        '-c:v', 'h264_nvenc',
+        '-preset', nvencPreset,
+        '-pix_fmt', 'yuv420p',
+        '-rc', qualityMode === 'bitrate' ? 'vbr' : 'vbr'
+      )
+      encoderUsed = 'h264_nvenc'
+      if (qualityMode === 'bitrate') {
+        args.push('-b:v', `${bitrateKbps}k`)
+      } else {
+        args.push('-cq', String(crf))
+      }
+    } else {
+      args.push(
+        '-c:v', 'libx264',
+        '-preset', preset,
+        '-pix_fmt', 'yuv420p'
+      )
+      encoderUsed = 'libx264'
+      if (qualityMode === 'bitrate') {
+        args.push('-b:v', `${bitrateKbps}k`)
+      } else {
+        args.push('-crf', String(crf))
+      }
+    }
+  }
+
+  if (keyframeInterval && Number(keyframeInterval) > 0) {
+    args.push('-g', String(keyframeInterval), '-keyint_min', String(keyframeInterval))
+  }
+
+  if (format === 'mp4') {
+    args.push('-movflags', '+faststart')
+  }
+
+  if (audioPath) {
+    const useOpus = format === 'webm' || audioCodec === 'opus'
+    args.push('-c:a', useOpus ? 'libopus' : 'aac')
+    args.push('-b:a', `${audioBitrateKbps}k`)
+    args.push('-ar', String(audioSampleRate))
+  }
+
+  args.push(outputPath)
+  console.log(`[Export] Encoding with ${encoderUsed} (${useHardwareEncoder ? 'NVENC' : 'software'})`)
+
+  return await new Promise((resolve) => {
+    const ffmpeg = spawn(ffmpegPath, args, { windowsHide: true })
+    let stderr = ''
+
+    ffmpeg.stderr.on('data', (data) => {
+      stderr += data.toString()
+    })
+
+    ffmpeg.on('error', (err) => {
+      resolve({ success: false, error: err.message })
+    })
+
+    ffmpeg.on('close', (code) => {
+      if (code === 0) {
+        resolve({ success: true, encoderUsed })
+      } else {
+        resolve({ success: false, error: stderr || `FFmpeg exited with code ${code}`, encoderUsed })
+      }
+    })
+  })
+})
+
+ipcMain.handle('export:checkNvenc', async () => {
+  if (!ffmpegPath) {
+    return { available: false, h264: false, h265: false, error: 'FFmpeg binary not available.' }
+  }
+  
+  return await new Promise((resolve) => {
+    const ffmpeg = spawn(ffmpegPath, ['-hide_banner', '-encoders'], { windowsHide: true })
+    let output = ''
+    
+    ffmpeg.stdout.on('data', (data) => {
+      output += data.toString()
+    })
+    ffmpeg.stderr.on('data', (data) => {
+      output += data.toString()
+    })
+    
+    ffmpeg.on('error', (err) => {
+      resolve({ available: false, h264: false, h265: false, error: err.message })
+    })
+    
+    ffmpeg.on('close', () => {
+      const hasH264 = output.includes('h264_nvenc')
+      const hasH265 = output.includes('hevc_nvenc')
+      resolve({
+        available: hasH264 || hasH265,
+        h264: hasH264,
+        h265: hasH265,
+      })
+    })
+  })
 })
 
 // ============================================

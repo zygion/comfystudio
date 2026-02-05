@@ -131,6 +131,26 @@ export const saveProject = async (projectDir, projectData) => {
 }
 
 /**
+ * Safely parse project JSON without crashing startup
+ * @param {string} rawText
+ * @param {string} sourceLabel
+ * @returns {object|null}
+ */
+const parseProjectJson = (rawText, sourceLabel) => {
+  const trimmed = typeof rawText === 'string' ? rawText.trim() : ''
+  if (!trimmed) {
+    return null
+  }
+
+  try {
+    return JSON.parse(trimmed)
+  } catch (err) {
+    console.warn(`Invalid project file (${sourceLabel})`, err)
+    return null
+  }
+}
+
+/**
  * Load project data from .storyflow file
  * @param {string|FileSystemDirectoryHandle} projectDir - The project directory
  * @returns {Promise<object|null>} - The project data or null if not found
@@ -147,7 +167,7 @@ export const loadProject = async (projectDir) => {
     if (!result.success) {
       throw new Error(result.error)
     }
-    return JSON.parse(result.data)
+    return parseProjectJson(result.data, filePath)
   }
   
   // Web fallback
@@ -155,7 +175,7 @@ export const loadProject = async (projectDir) => {
     const fileHandle = await projectDir.getFileHandle('project.storyflow')
     const file = await fileHandle.getFile()
     const text = await file.text()
-    return JSON.parse(text)
+    return parseProjectJson(text, 'project.storyflow')
   } catch (err) {
     if (err.name === 'NotFoundError') {
       return null
@@ -312,6 +332,7 @@ export const importAsset = async (projectDir, file, category = 'video') => {
     let duration = null
     let width = null
     let height = null
+    let fps = null
     
     if (category === 'video' || category === 'audio') {
       try {
@@ -341,6 +362,17 @@ export const importAsset = async (projectDir, file, category = 'video') => {
         }
       }
     }
+
+    if (category === 'video') {
+      try {
+        const fpsResult = await window.electronAPI.getVideoFps(destPath)
+        if (fpsResult?.success && fpsResult.fps) {
+          fps = fpsResult.fps
+        }
+      } catch (err) {
+        console.warn('Could not get video FPS:', err)
+      }
+    }
     
     return {
       id: `asset_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`,
@@ -354,6 +386,7 @@ export const importAsset = async (projectDir, file, category = 'video') => {
       duration,
       width,
       height,
+      fps,
       isImported: true,
     }
   }

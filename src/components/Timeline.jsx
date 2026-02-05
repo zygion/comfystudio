@@ -31,6 +31,15 @@ function Timeline({ onOpenAudioGenerate }) {
   
   // Trimming state
   const [trimState, setTrimState] = useState(null) // { clipId, edge: 'left' | 'right', startX, startValue }
+
+  const getTimeScale = (clip) => {
+    if (!clip) return 1
+    if (clip.sourceTimeScale) return clip.sourceTimeScale
+    if (clip.timelineFps && clip.sourceFps) {
+      return clip.timelineFps / clip.sourceFps
+    }
+    return 1
+  }
   
   // Scrubbing state (for dragging playhead)
   const [isScrubbing, setIsScrubbing] = useState(false)
@@ -122,7 +131,8 @@ function Timeline({ onOpenAudioGenerate }) {
     requestMaskPicker
   } = useTimelineStore()
 
-  const { currentProjectHandle } = useProjectStore()
+  const { currentProjectHandle, getCurrentTimelineSettings } = useProjectStore()
+  const timelineFps = getCurrentTimelineSettings()?.fps
   
   const edgeTransitionsByClipId = useMemo(() => {
     const map = new Map()
@@ -576,7 +586,7 @@ function Timeline({ onOpenAudioGenerate }) {
     const isVideoTrack = track.type === 'video'
     
     if ((isVideoAsset && isVideoTrack) || (!isVideoAsset && !isVideoTrack)) {
-      addClip(trackId, asset, startTime)
+      addClip(trackId, asset, startTime, timelineFps)
     }
   }
 
@@ -684,7 +694,7 @@ function Timeline({ onOpenAudioGenerate }) {
         // Duplicate clip right after current position
         const asset = assets.find(a => a.id === clip.assetId)
         if (asset) {
-          addClip(clip.trackId, asset, clip.startTime + clip.duration + 0.1)
+          addClip(clip.trackId, asset, clip.startTime + clip.duration + 0.1, timelineFps)
         }
         break
       case 'split':
@@ -696,7 +706,7 @@ function Timeline({ onOpenAudioGenerate }) {
           // Create new clip after split
           const asset = assets.find(a => a.id === clip.assetId)
           if (asset) {
-            const newClip = addClip(clip.trackId, asset, playheadPosition)
+            const newClip = addClip(clip.trackId, asset, playheadPosition, timelineFps)
             if (newClip) {
               resizeClip(newClip.id, clip.duration - splitTime)
             }
@@ -766,6 +776,9 @@ function Timeline({ onOpenAudioGenerate }) {
     // Save to history before trimming starts
     saveToHistory()
     
+    const timeScale = getTimeScale(clip)
+    const startTrimEnd = clip.trimEnd ?? clip.sourceDuration ?? ((clip.trimStart || 0) + clip.duration * timeScale)
+
     setTrimState({
       clipId,
       edge,
@@ -773,7 +786,7 @@ function Timeline({ onOpenAudioGenerate }) {
       startTime: clip.startTime,
       startDuration: clip.duration,
       startTrimStart: clip.trimStart || 0,
-      startTrimEnd: clip.trimEnd || clip.duration,
+      startTrimEnd: startTrimEnd,
     })
     
     selectClip(clipId)
@@ -789,6 +802,7 @@ function Timeline({ onOpenAudioGenerate }) {
       
       const clip = clips.find(c => c.id === trimState.clipId)
       if (!clip) return
+      const timeScale = getTimeScale(clip)
       
       // Find neighboring clips on the same track to prevent trimming past them
       const trackClips = clips.filter(c => c.trackId === clip.trackId && c.id !== clip.id)
@@ -818,10 +832,10 @@ function Timeline({ onOpenAudioGenerate }) {
         // Calculate what the new trimStart would be
         // If timeDelta is negative (extending left), trimStart decreases
         // trimStart can't go below 0 (can't reveal footage before the source start)
-        let newTrimStart = trimState.startTrimStart + timeDelta
+        let newTrimStart = trimState.startTrimStart + timeDelta * timeScale
         if (newTrimStart < 0) {
           // Clamp: can only extend to where trimStart would be 0
-          const minStartTime = trimState.startTime - trimState.startTrimStart
+          const minStartTime = trimState.startTime - (trimState.startTrimStart / timeScale)
           newStartTime = Math.max(newStartTime, minStartTime)
           timeDelta = newStartTime - trimState.startTime
           newTrimStart = 0
@@ -833,7 +847,7 @@ function Timeline({ onOpenAudioGenerate }) {
           if (newStartTime < leftNeighborEnd) {
             newStartTime = leftNeighborEnd
             timeDelta = newStartTime - trimState.startTime
-            newTrimStart = trimState.startTrimStart + timeDelta
+            newTrimStart = trimState.startTrimStart + timeDelta * timeScale
           }
         }
         
@@ -844,9 +858,9 @@ function Timeline({ onOpenAudioGenerate }) {
           let snappedTime = snapResult.time
           
           // Check source footage constraint
-          const snappedTrimStart = trimState.startTrimStart + (snappedTime - trimState.startTime)
+          const snappedTrimStart = trimState.startTrimStart + (snappedTime - trimState.startTime) * timeScale
           if (snappedTrimStart < 0) {
-            snappedTime = trimState.startTime - trimState.startTrimStart
+            snappedTime = trimState.startTime - (trimState.startTrimStart / timeScale)
           }
           
           // Check neighbor constraint
@@ -857,7 +871,7 @@ function Timeline({ onOpenAudioGenerate }) {
           if (snappedTime === snapResult.time) {
             newStartTime = snapResult.time
             timeDelta = newStartTime - trimState.startTime
-            newTrimStart = trimState.startTrimStart + timeDelta
+            newTrimStart = trimState.startTrimStart + timeDelta * timeScale
             setActiveSnapTime(snapResult.time)
           } else {
             clearActiveSnap()
@@ -909,11 +923,11 @@ function Timeline({ onOpenAudioGenerate }) {
         // from the current trimStart to the end of the source
         const sourceDuration = clip.sourceDuration || Infinity
         const currentTrimStart = clip.trimStart || 0
-        const maxPossibleDuration = sourceDuration - currentTrimStart
+        const maxPossibleDuration = (sourceDuration - currentTrimStart) / timeScale
         newDuration = Math.min(newDuration, maxPossibleDuration)
         
         // Calculate the new trimEnd (where in the source footage the clip ends)
-        const newTrimEnd = currentTrimStart + newDuration
+        const newTrimEnd = currentTrimStart + (newDuration * timeScale)
         
         updateClipTrim(trimState.clipId, {
           duration: newDuration,

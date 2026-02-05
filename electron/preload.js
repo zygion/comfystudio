@@ -88,6 +88,23 @@ contextBridge.exposeInMainWorld('electronAPI', {
    * @returns {Promise<{success: boolean, error?: string}>}
    */
   writeFileFromArrayBuffer: (filePath, arrayBuffer) => ipcRenderer.invoke('fs:writeFileFromArrayBuffer', filePath, arrayBuffer),
+
+  // ============================================
+  // Export Operations
+  // ============================================
+
+  /**
+   * Encode a frame sequence into a video file
+   * @param {Object} options - { framePattern, fps, outputPath, audioPath, format }
+   * @returns {Promise<{success: boolean, error?: string}>}
+   */
+  encodeVideo: (options) => ipcRenderer.invoke('export:encodeVideo', options),
+
+  /**
+   * Check if FFmpeg supports NVIDIA NVENC encoders
+   * @returns {Promise<{available: boolean, h264: boolean, h265: boolean, error?: string}>}
+   */
+  checkNvenc: () => ipcRenderer.invoke('export:checkNvenc'),
   
   /**
    * Delete a file
@@ -194,6 +211,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getFileUrl: (filePath) => ipcRenderer.invoke('media:getFileUrl', filePath),
   
   /**
+   * Get video FPS via ffprobe (Electron only)
+   * @param {string} filePath
+   * @returns {Promise<{success: boolean, fps?: number, error?: string}>}
+   */
+  getVideoFps: (filePath) => ipcRenderer.invoke('media:getVideoFps', filePath),
+
+  /**
    * Get a direct file:// URL for a local file
    * @param {string} filePath 
    * @returns {Promise<string>}
@@ -225,6 +249,15 @@ contextBridge.exposeInMainWorld('electronAPI', {
    * @returns {Promise<{success: boolean, error?: string}>}
    */
   deleteSetting: (key) => ipcRenderer.invoke('settings:delete', key),
+
+  // ============================================
+  // Window Controls
+  // ============================================
+
+  minimizeWindow: () => ipcRenderer.invoke('window:minimize'),
+  toggleMaximizeWindow: () => ipcRenderer.invoke('window:toggleMaximize'),
+  closeWindow: () => ipcRenderer.invoke('window:close'),
+  isWindowMaximized: () => ipcRenderer.invoke('window:isMaximized'),
 })
 
 // Also expose a simple check for detecting Electron

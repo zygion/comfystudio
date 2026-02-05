@@ -112,6 +112,7 @@ Users can import their own media via Assets Panel:
 - **Home button** (🏠): Returns to Welcome Screen (saves & closes current project)
 - **Save button** (💾): Manual save (though auto-save handles this)
 - Project name displayed in center
+- **Editor/Export tabs**: Resolve-style top tabs centered to the preview area
 
 ## Multiple Timelines
 Each project supports multiple timelines (like DaVinci Resolve):
@@ -161,6 +162,7 @@ This enables workflows like:
 | `src/components/NewTimelineDialog.jsx` | Timeline creation form with resolution/fps settings |
 | `src/components/TimelineSwitcher.jsx` | Timeline dropdown for multi-timeline support |
 | `src/components/TitleBar.jsx` | App title bar with home/save buttons |
+| `src/components/ExportPanel.jsx` | Export UI (Resolve-style settings + queue) |
 | `src/components/Timeline.jsx` | Multi-track timeline with clips, resizable track headers |
 | `src/components/PreviewPanel.jsx` | Video preview with multi-layer compositing, scroll zoom |
 | `src/components/VideoLayerRenderer.jsx` | Video + text layer rendering with preloading |
@@ -172,6 +174,7 @@ This enables workflows like:
 | `src/hooks/useTimelinePlayback.js` | Timeline playback loop with loop modes |
 | `src/hooks/useSnapping.js` | Clip snapping logic |
 | `src/services/comfyui.js` | ComfyUI API service |
+| `src/services/exporter.js` | Timeline export renderer + audio mix + FFmpeg handoff |
 | `src/services/videoCache.js` | Video element pooling and preloading |
 
 ## Timeline Features
@@ -318,6 +321,36 @@ Preview panel includes professional overlay guides accessible via **Guides** dro
 
 Letterbox shows black bars to visualize how content will appear in different delivery formats.
 
+## Export (Resolve-style)
+Export full edits (cuts, transitions, masks, text, audio) to a video file.
+
+**Export UI:**
+- Top **Editor / Export** tabs (centered to preview area)
+- Tabs: **Video / Audio / File**
+- Queue with **Start / Pause / Resume**
+- ETA + render speed (fps)
+- Performance hints (NVENC availability, cached masks, resolution/FPS)
+
+**Video Settings:**
+- Formats: MP4 (H.264/H.265), WebM (VP9)
+- Encoders: software (x264/x265) or **NVIDIA NVENC**
+- CRF or bitrate mode
+- Keyframe interval (auto/manual)
+- Presets + NVENC P1–P7
+- Resolution + FPS (project or override)
+- Options: **Use cached renders**, **Fast seek**
+
+**Audio Settings:**
+- Include audio toggle
+- Codec: AAC (MP4), Opus (WebM)
+- Bitrate, sample rate, channels
+
+**Implementation Details:**
+- Frame-by-frame compositing to PNG sequence (canvas)
+- Uses cached renders for masked clips if enabled
+- Audio mixdown via OfflineAudioContext → WAV
+- Encoding via FFmpeg in Electron main process
+
 ## Playback Modes (Right-click Play button)
 - **Normal**: Play once and stop at end
 - **Loop**: Loop entire timeline continuously
@@ -420,7 +453,6 @@ clearAllKeyframes(clipId)
 - [ ] Copy/Paste clips
 - [ ] Timeline markers
 - [ ] Audio waveforms
-- [ ] Export to video file
 - [ ] Text animation presets
 - [ ] Keyframe easing editor (curve UI)
 - [ ] Keyframe copy/paste
@@ -428,6 +460,40 @@ clearAllKeyframes(clipId)
 ---
 
 ## Recent Changes Log
+
+### Export Pipeline + NVENC + Queue (Feb 2026)
+
+**Export Tab & Resolve-style Settings:**
+- Added **Editor / Export** tabs in title bar, centered to preview area
+- New Export panel with Video/Audio/File tabs and export queue
+- Settings include codec, bitrate/CRF, presets, keyframes, resolution, FPS
+- ETA + render speed with performance hints
+
+**Export Pipeline (Full Timeline):**
+- Renders full edit to PNG sequence (text, transitions, masks, transforms)
+- Audio mixdown via OfflineAudioContext → WAV
+- FFmpeg encoding (MP4/WebM)
+- Cached render usage for masked clips
+- Fast seek for quicker frame generation
+
+**GPU Encoding (NVENC) + Detection:**
+- NVIDIA NVENC toggle with preset selection
+- FFmpeg NVENC detection + warnings
+
+**Queue Controls:**
+- Start/Pause/Resume queue
+- Per-item status + error display
+
+**New/Modified Files:**
+| File | Changes |
+|------|---------|
+| `src/components/ExportPanel.jsx` | Export UI, queue, ETA, hints, settings |
+| `src/services/exporter.js` | Frame renderer + audio mix + FFmpeg handoff |
+| `src/components/TitleBar.jsx` | Editor/Export tabs centered to preview |
+| `src/App.jsx` | Main tab layout integration |
+| `electron/main.js` | FFmpeg encode + NVENC detection IPC |
+| `electron/preload.js` | `encodeVideo` + `checkNvenc` bridges |
+| `package.json` | Added `ffmpeg-static` dependency |
 
 ### Keyframing Feature (Feb 2026)
 Added keyframe-based animation for transform properties.
@@ -855,6 +921,8 @@ npm run electron:build:linux  # Linux only
 - `pathJoin(...parts)` - Join path segments
 - `getAppPath(name)` - Get special paths (documents, userData, etc.)
 - `getFileUrlDirect(path)` - Get file:// URL for media playback
+- `encodeVideo(options)` - Encode export frames with FFmpeg
+- `checkNvenc()` - Detect NVENC support in FFmpeg
 - `getSetting(key)` / `setSetting(key, value)` - Persistent settings
 
 **File URL Handling:**

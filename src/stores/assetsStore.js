@@ -302,20 +302,28 @@ export const useAssetsStore = create(
     const assetsWithUrls = []
     
     for (const asset of (projectAssets || [])) {
-      if (asset.isImported && asset.path && projectHandle) {
-        // For imported assets, regenerate blob URL from file
+      const needsUrlRefresh = asset?.url?.startsWith?.('blob:')
+      const hasPath = !!asset?.path
+      const hasAbsolutePath = !!asset?.absolutePath
+
+      if ((asset.isImported || needsUrlRefresh || hasPath || hasAbsolutePath) && projectHandle) {
+        // For imported assets (or stale blob URLs), regenerate URL from file
         try {
-          const { getProjectFileUrl } = await import('../services/fileSystem')
-          const url = await getProjectFileUrl(projectHandle, asset.path)
+          const { getProjectFileUrl, getAbsoluteFileUrl, isElectron } = await import('../services/fileSystem')
+          let url = null
+          if (isElectron() && hasAbsolutePath) {
+            url = await getAbsoluteFileUrl(asset.absolutePath)
+          } else if (hasPath) {
+            url = await getProjectFileUrl(projectHandle, asset.path)
+          }
           assetsWithUrls.push({ ...asset, url })
         } catch (err) {
-          console.warn(`Could not load imported asset ${asset.name}:`, err)
+          console.warn(`Could not load asset ${asset.name}:`, err)
           // Keep asset but mark URL as null
           assetsWithUrls.push({ ...asset, url: null })
         }
       } else {
-        // For AI assets, keep the URL as-is (may need ComfyUI to be running)
-        // In future, these should also be saved locally
+        // For AI/external assets, keep the URL as-is (may need ComfyUI to be running)
         assetsWithUrls.push(asset)
       }
     }

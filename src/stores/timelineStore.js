@@ -5,6 +5,67 @@ import { TRANSITION_DEFAULT_SETTINGS } from '../constants/transitions'
 // Maximum number of undo states to keep
 const MAX_HISTORY_SIZE = 50
 
+const getClipTimeScale = (clip) => {
+  if (!clip) return 1
+  if (clip.sourceTimeScale) return clip.sourceTimeScale
+  if (clip.timelineFps && clip.sourceFps) {
+    return clip.timelineFps / clip.sourceFps
+  }
+  return 1
+}
+
+const timelineToSourceTime = (clip, timelineSeconds) => {
+  return timelineSeconds * getClipTimeScale(clip)
+}
+
+const sourceToTimelineTime = (clip, sourceSeconds) => {
+  return sourceSeconds / getClipTimeScale(clip)
+}
+
+const getClipTrimEnd = (clip) => {
+  if (!clip) return 0
+  if (clip.trimEnd !== undefined && clip.trimEnd !== null) return clip.trimEnd
+  if (clip.sourceDuration !== undefined && clip.sourceDuration !== null) return clip.sourceDuration
+  return (clip.trimStart || 0) + timelineToSourceTime(clip, clip.duration || 0)
+}
+
+const normalizeClipTimebases = (clips, assets, timelineFps) => {
+  if (!clips || clips.length === 0) return clips || []
+  if (!Number.isFinite(timelineFps) || timelineFps <= 0) return clips
+
+  const assetsById = new Map((assets || []).map(asset => [asset.id, asset]))
+
+  return clips.map((clip) => {
+    if (!clip || clip.type !== 'video') return clip
+    if (clip.sourceTimeScale || clip.sourceFps || clip.timelineFps) return clip
+
+    const asset = assetsById.get(clip.assetId)
+    const sourceFps = Number(asset?.settings?.fps ?? asset?.fps)
+    if (!Number.isFinite(sourceFps) || sourceFps <= 0) return clip
+
+    const timeScale = timelineFps / sourceFps
+    const sourceDuration = clip.sourceDuration
+      || asset?.settings?.duration
+      || asset?.duration
+      || clip.duration
+    const trimStart = clip.trimStart || 0
+    const trimEnd = clip.trimEnd ?? sourceDuration
+    const sourceSpan = Math.max(0, Math.min(sourceDuration, trimEnd) - trimStart)
+    const newDuration = sourceSpan / timeScale
+
+    return {
+      ...clip,
+      sourceDuration,
+      trimStart,
+      trimEnd: Math.min(trimEnd, sourceDuration),
+      duration: newDuration,
+      sourceFps,
+      timelineFps,
+      sourceTimeScale: timeScale,
+    }
+  })
+}
+
 /**
  * Store for managing timeline state
  * Persisted to localStorage for data survival across refreshes
@@ -234,13 +295,14 @@ export const useTimelineStore = create(
       // Case 2: New clip cuts the beginning of existing clip -> trim existing clip's start
       else if (newStartTime <= clip.startTime && newEndTime < clipEnd) {
         const trimAmount = newEndTime - clip.startTime
+        const trimAmountSource = timelineToSourceTime(clip, trimAmount)
         const idx = updatedClips.findIndex(c => c.id === clip.id)
         if (idx !== -1) {
           updatedClips[idx] = {
             ...updatedClips[idx],
             startTime: newEndTime,
             duration: clipEnd - newEndTime,
-            trimStart: (clip.trimStart || 0) + trimAmount
+            trimStart: (clip.trimStart || 0) + trimAmountSource
           }
         }
       }
@@ -248,10 +310,11 @@ export const useTimelineStore = create(
       else if (newStartTime > clip.startTime && newEndTime >= clipEnd) {
         const idx = updatedClips.findIndex(c => c.id === clip.id)
         if (idx !== -1) {
+          const newDuration = newStartTime - clip.startTime
           updatedClips[idx] = {
             ...updatedClips[idx],
-            duration: newStartTime - clip.startTime,
-            trimEnd: (clip.trimStart || 0) + (newStartTime - clip.startTime)
+            duration: newDuration,
+            trimEnd: (clip.trimStart || 0) + timelineToSourceTime(clip, newDuration)
           }
         }
       }
@@ -264,13 +327,13 @@ export const useTimelineStore = create(
           updatedClips[idx] = {
             ...updatedClips[idx],
             duration: firstPartDuration,
-            trimEnd: (clip.trimStart || 0) + firstPartDuration
+            trimEnd: (clip.trimStart || 0) + timelineToSourceTime(clip, firstPartDuration)
           }
           
           // Create a second clip for the part after the new clip
           const secondPartStart = newEndTime
           const secondPartDuration = clipEnd - newEndTime
-          const secondPartTrimStart = (clip.trimStart || 0) + (newEndTime - clip.startTime)
+          const secondPartTrimStart = (clip.trimStart || 0) + timelineToSourceTime(clip, newEndTime - clip.startTime)
           
           clipsToAdd.push({
             ...clip,
@@ -278,7 +341,7 @@ export const useTimelineStore = create(
             startTime: secondPartStart,
             duration: secondPartDuration,
             trimStart: secondPartTrimStart,
-            trimEnd: clip.trimEnd || clip.sourceDuration
+            trimEnd: getClipTrimEnd(clip)
           })
         }
       }
@@ -296,7 +359,7 @@ export const useTimelineStore = create(
   /**
    * Add a clip to the timeline
    */
-  addClip: (trackId, asset, startTime = null) => {
+  addClip: (trackId, asset, startTime = null, timelineFps = null) => {
     const state = get()
     const track = state.tracks.find(t => t.id === trackId)
     if (!track) return null
@@ -314,9 +377,14 @@ export const useTimelineStore = create(
     // For videos/audio, use the actual source duration
     // Check both asset.duration and asset.settings.duration (different sources store it differently)
     const isImage = asset.type === 'image'
+    const isVideo = asset.type === 'video'
     const assetDuration = asset.duration || asset.settings?.duration || null
     const sourceDuration = isImage ? Infinity : (assetDuration || 5)
-    const defaultDuration = isImage ? 5 : sourceDuration // Images default to 5s but can be extended
+    const sourceFps = isVideo ? Number(asset.settings?.fps ?? asset.fps) : null
+    const normalizedTimelineFps = Number(timelineFps)
+    const hasValidFps = Number.isFinite(sourceFps) && sourceFps > 0 && Number.isFinite(normalizedTimelineFps) && normalizedTimelineFps > 0
+    const sourceTimeScale = hasValidFps ? (normalizedTimelineFps / sourceFps) : 1
+    const defaultDuration = isImage ? 5 : (sourceDuration / sourceTimeScale) // Images default to 5s but can be extended
     
     // Log a warning if we couldn't get the actual duration
     if (!isImage && !assetDuration) {
@@ -332,7 +400,10 @@ export const useTimelineStore = create(
       duration: defaultDuration, // Visible duration on timeline
       sourceDuration: sourceDuration, // Original media duration (Infinity for images)
       trimStart: 0, // In-point (seconds from source start)
-      trimEnd: defaultDuration, // Out-point (for images, this can grow)
+      trimEnd: isImage ? defaultDuration : sourceDuration, // Out-point (for images, this can grow)
+      sourceFps: hasValidFps ? sourceFps : null,
+      timelineFps: hasValidFps ? normalizedTimelineFps : null,
+      sourceTimeScale: hasValidFps ? sourceTimeScale : 1,
       color: track.type === 'video' ? getVideoColor(state.clipCounter) : getAudioColor(track.id),
       type: asset.type,
       url: asset.url,
@@ -602,13 +673,14 @@ export const useTimelineStore = create(
               // Case 2: Moved clip cuts the beginning of existing clip -> trim existing clip's start
               else if (finalStartTime <= existingClip.startTime && newEndTime < clipEnd) {
                 const trimAmount = newEndTime - existingClip.startTime
+                const trimAmountSource = timelineToSourceTime(existingClip, trimAmount)
                 const idx = updatedClips.findIndex(c => c.id === existingClip.id)
                 if (idx !== -1) {
                   updatedClips[idx] = {
                     ...updatedClips[idx],
                     startTime: newEndTime,
                     duration: clipEnd - newEndTime,
-                    trimStart: (existingClip.trimStart || 0) + trimAmount
+                    trimStart: (existingClip.trimStart || 0) + trimAmountSource
                   }
                 }
               }
@@ -616,10 +688,11 @@ export const useTimelineStore = create(
               else if (finalStartTime > existingClip.startTime && newEndTime >= clipEnd) {
                 const idx = updatedClips.findIndex(c => c.id === existingClip.id)
                 if (idx !== -1) {
+                  const newDuration = finalStartTime - existingClip.startTime
                   updatedClips[idx] = {
                     ...updatedClips[idx],
-                    duration: finalStartTime - existingClip.startTime,
-                    trimEnd: (existingClip.trimStart || 0) + (finalStartTime - existingClip.startTime)
+                    duration: newDuration,
+                    trimEnd: (existingClip.trimStart || 0) + timelineToSourceTime(existingClip, newDuration)
                   }
                 }
               }
@@ -632,13 +705,13 @@ export const useTimelineStore = create(
                   updatedClips[idx] = {
                     ...updatedClips[idx],
                     duration: firstPartDuration,
-                    trimEnd: (existingClip.trimStart || 0) + firstPartDuration
+                    trimEnd: (existingClip.trimStart || 0) + timelineToSourceTime(existingClip, firstPartDuration)
                   }
                   
                   // Create a second clip for the part after the moved clip
                   const secondPartStart = newEndTime
                   const secondPartDuration = clipEnd - newEndTime
-                  const secondPartTrimStart = (existingClip.trimStart || 0) + (newEndTime - existingClip.startTime)
+                  const secondPartTrimStart = (existingClip.trimStart || 0) + timelineToSourceTime(existingClip, newEndTime - existingClip.startTime)
                   
                   clipsToAdd.push({
                     ...existingClip,
@@ -646,7 +719,7 @@ export const useTimelineStore = create(
                     startTime: secondPartStart,
                     duration: secondPartDuration,
                     trimStart: secondPartTrimStart,
-                    trimEnd: existingClip.trimEnd || existingClip.sourceDuration
+                    trimEnd: getClipTrimEnd(existingClip)
                   })
                 }
               }
@@ -738,11 +811,12 @@ export const useTimelineStore = create(
             const trimAmount = newEndTime - existingClip.startTime
             const idx = updatedClips.findIndex(c => c.id === existingClip.id)
             if (idx !== -1) {
+              const trimAmountSource = timelineToSourceTime(existingClip, trimAmount)
               updatedClips[idx] = {
                 ...updatedClips[idx],
                 startTime: newEndTime,
                 duration: clipEnd - newEndTime,
-                trimStart: (existingClip.trimStart || 0) + trimAmount
+                trimStart: (existingClip.trimStart || 0) + trimAmountSource
               }
             }
           }
@@ -750,10 +824,11 @@ export const useTimelineStore = create(
           else if (newStartTime > existingClip.startTime && newEndTime >= clipEnd) {
             const idx = updatedClips.findIndex(c => c.id === existingClip.id)
             if (idx !== -1) {
+              const newDuration = newStartTime - existingClip.startTime
               updatedClips[idx] = {
                 ...updatedClips[idx],
-                duration: newStartTime - existingClip.startTime,
-                trimEnd: (existingClip.trimStart || 0) + (newStartTime - existingClip.startTime)
+                duration: newDuration,
+                trimEnd: (existingClip.trimStart || 0) + timelineToSourceTime(existingClip, newDuration)
               }
             }
           }
@@ -765,12 +840,12 @@ export const useTimelineStore = create(
               updatedClips[idx] = {
                 ...updatedClips[idx],
                 duration: firstPartDuration,
-                trimEnd: (existingClip.trimStart || 0) + firstPartDuration
+                trimEnd: (existingClip.trimStart || 0) + timelineToSourceTime(existingClip, firstPartDuration)
               }
               
               const secondPartStart = newEndTime
               const secondPartDuration = clipEnd - newEndTime
-              const secondPartTrimStart = (existingClip.trimStart || 0) + (newEndTime - existingClip.startTime)
+              const secondPartTrimStart = (existingClip.trimStart || 0) + timelineToSourceTime(existingClip, newEndTime - existingClip.startTime)
               
               clipsToAdd.push({
                 ...existingClip,
@@ -778,7 +853,7 @@ export const useTimelineStore = create(
                 startTime: secondPartStart,
                 duration: secondPartDuration,
                 trimStart: secondPartTrimStart,
-                trimEnd: existingClip.trimEnd || existingClip.sourceDuration
+                trimEnd: getClipTrimEnd(existingClip)
               })
               addedCounter++
             }
@@ -806,7 +881,14 @@ export const useTimelineStore = create(
     set((state) => ({
       clips: state.clips.map(clip =>
         clip.id === clipId
-          ? { ...clip, duration: Math.max(0.5, newDuration) }
+          ? (() => {
+              const nextDuration = Math.max(0.5, newDuration)
+              const timeScale = getClipTimeScale(clip)
+              const nextTrimEnd = clip.sourceDuration === Infinity
+                ? nextDuration
+                : (clip.trimStart || 0) + timelineToSourceTime(clip, nextDuration)
+              return { ...clip, duration: nextDuration, trimEnd: nextTrimEnd }
+            })()
           : clip
       )
     }))
@@ -1507,14 +1589,21 @@ export const useTimelineStore = create(
       clips: state.clips.map(clip => {
         if (clip.id !== clipId) return clip
         
-        const newTrimStart = Math.max(0, Math.min(clip.trimEnd - 0.5, clip.trimStart + deltaTime))
-        const trimDelta = newTrimStart - clip.trimStart
+        const timeScale = getClipTimeScale(clip)
+        const minSourceDuration = 0.5 * timeScale
+        const currentTrimEnd = getClipTrimEnd(clip)
+        const newTrimStart = Math.max(
+          0,
+          Math.min(currentTrimEnd - minSourceDuration, (clip.trimStart || 0) + deltaTime * timeScale)
+        )
+        const trimDeltaSource = newTrimStart - (clip.trimStart || 0)
+        const trimDeltaTimeline = trimDeltaSource / timeScale
         
         return {
           ...clip,
           trimStart: newTrimStart,
-          startTime: clip.startTime + trimDelta,
-          duration: clip.duration - trimDelta
+          startTime: clip.startTime + trimDeltaTimeline,
+          duration: clip.duration - trimDeltaTimeline
         }
       })
     }))
@@ -1531,9 +1620,15 @@ export const useTimelineStore = create(
         
         // For images (Infinity source), allow extending without limit
         // For video/audio, cap at source duration
+        const timeScale = getClipTimeScale(clip)
         const maxDuration = clip.sourceDuration === Infinity ? Infinity : clip.sourceDuration
-        const newTrimEnd = Math.max(clip.trimStart + 0.5, Math.min(maxDuration, clip.trimEnd + deltaTime))
-        const newDuration = newTrimEnd - clip.trimStart
+        const minSourceDuration = 0.5 * timeScale
+        const currentTrimEnd = getClipTrimEnd(clip)
+        const newTrimEnd = Math.max(
+          (clip.trimStart || 0) + minSourceDuration,
+          Math.min(maxDuration, currentTrimEnd + deltaTime * timeScale)
+        )
+        const newDuration = (newTrimEnd - (clip.trimStart || 0)) / timeScale
         
         return {
           ...clip,
@@ -1554,8 +1649,10 @@ export const useTimelineStore = create(
     const clip = state.clips.find(c => c.id === clipId)
     if (!clip) return { head: 0, tail: 0 }
     
-    const headHandle = clip.trimStart || 0
-    const tailHandle = (clip.sourceDuration || clip.duration) - (clip.trimEnd || clip.duration)
+    const headHandle = sourceToTimelineTime(clip, clip.trimStart || 0)
+    const sourceDuration = clip.sourceDuration || getClipTrimEnd(clip)
+    const trimEnd = getClipTrimEnd(clip)
+    const tailHandle = sourceToTimelineTime(clip, sourceDuration - trimEnd)
     
     return {
       head: Math.max(0, headHandle),
@@ -1676,19 +1773,22 @@ export const useTimelineStore = create(
       clips: state.clips.map(c => {
         if (c.id === clipAId) {
           // Extend clipA's duration and trimEnd
+          const trimEnd = getClipTrimEnd(c)
+          const trimEndDelta = timelineToSourceTime(c, halfDuration)
           return {
             ...c,
             duration: c.duration + halfDuration,
-            trimEnd: (c.trimEnd || c.duration) + halfDuration
+            trimEnd: trimEnd + trimEndDelta
           }
         }
         if (c.id === clipBId) {
           // Start clipB earlier and adjust trimStart
+          const trimStartDelta = timelineToSourceTime(c, halfDuration)
           return {
             ...c,
             startTime: c.startTime - halfDuration,
             duration: c.duration + halfDuration,
-            trimStart: Math.max(0, (c.trimStart || 0) - halfDuration)
+            trimStart: Math.max(0, (c.trimStart || 0) - trimStartDelta)
           }
         }
         return c
@@ -1857,18 +1957,21 @@ export const useTimelineStore = create(
     set((state) => ({
       clips: state.clips.map(c => {
         if (c.id === transition.clipAId) {
+          const trimEnd = getClipTrimEnd(c)
+          const trimEndDelta = timelineToSourceTime(c, actualHalfDiff)
           return {
             ...c,
             duration: c.duration + actualHalfDiff,
-            trimEnd: (c.trimEnd || c.duration) + actualHalfDiff
+            trimEnd: trimEnd + trimEndDelta
           }
         }
         if (c.id === transition.clipBId) {
+          const trimStartDelta = timelineToSourceTime(c, actualHalfDiff)
           return {
             ...c,
             startTime: c.startTime - actualHalfDiff,
             duration: c.duration + actualHalfDiff,
-            trimStart: Math.max(0, (c.trimStart || 0) - actualHalfDiff)
+            trimStart: Math.max(0, (c.trimStart || 0) - trimStartDelta)
           }
         }
         return c
@@ -2384,9 +2487,10 @@ export const useTimelineStore = create(
    * Load timeline data from a project
    * @param {object} timelineData - Timeline data from project file
    */
-  loadFromProject: (timelineData) => {
+  loadFromProject: (timelineData, assets = [], timelineFps = null) => {
     if (!timelineData) return
-    
+    const normalizedClips = normalizeClipTimebases(timelineData.clips || [], assets, timelineFps)
+
     set({
       duration: timelineData.duration || 60,
       zoom: timelineData.zoom || 100,
@@ -2397,7 +2501,7 @@ export const useTimelineStore = create(
         { id: 'voiceover', name: 'Voiceover', type: 'audio', muted: false, locked: false, visible: true },
         { id: 'sfx', name: 'SFX', type: 'audio', muted: false, locked: false, visible: true },
       ],
-      clips: timelineData.clips || [],
+      clips: normalizedClips,
       transitions: timelineData.transitions || [],
       clipCounter: timelineData.clipCounter || 1,
       transitionCounter: timelineData.transitionCounter || 1,
