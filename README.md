@@ -4,6 +4,19 @@ ComfyStudio is a desktop animatic, previsualization, and AI-assisted editing too
 
 It combines a timeline editor, asset browser, Generate workspace, stock search, LM Studio prompt helper, and export queue in one app.
 
+## Download
+
+Download the current public build from the [GitHub Releases page](https://github.com/JaimeIsMe/comfystudio/releases).
+
+The current public release is marked as a pre-release while early setup feedback comes in.
+
+Available release assets include:
+
+- Windows installer
+- Windows portable build
+- macOS Apple Silicon DMG
+- macOS Intel DMG
+
 ## What It Does
 
 - Edit projects with assets, preview, timeline, inspector, and export tools.
