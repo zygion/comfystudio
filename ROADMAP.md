@@ -1,0 +1,109 @@
+# ComfyStudio Roadmap
+
+ComfyStudio is evolving into an AI-native editing and generation environment built around ComfyUI.
+
+The goal is simple: make it easier to go from idea to edit to finished output inside one tool.
+
+This roadmap reflects our current priorities. It will continue to evolve as we ship features, test workflows, and get feedback from real users.
+
+## Current Direction
+
+Our focus is split across three major areas:
+
+1. Core editing polish
+2. Expanded generation workflows
+3. Higher-level creative tooling, including music video generation
+
+## What Already Exists
+
+ComfyStudio already includes a strong foundation that we want to keep improving:
+
+- Timeline-based editing
+- Asset browser and preview workflow
+- Cut at playhead
+- Marquee selection
+- Audio waveforms
+- Track management
+- Text layers and inspector controls
+- Local and cloud ComfyUI workflow support
+- Built-in workflow dependency checks
+- Director Mode and guided generation flows
+
+The roadmap below focuses on making these systems faster, deeper, and more production-friendly.
+
+## Phase 1: Core Editing Polish
+
+These are the highest-priority editing improvements aimed at making the editor feel faster, tighter, and more professional for day-to-day use.
+
+- Cut through all tracks at the playhead
+- Select everything from the playhead to the end of the timeline
+- Visual fade in and fade out controls directly on audio clips
+- Capture a still frame from the preview window into project assets
+- Improve clip movement and timeline precision
+- Continue tightening overall editing speed and usability
+
+## Phase 2: Precision Editing and Pro Workflow Features
+
+This phase focuses on features that help experienced editors work faster and with more control.
+
+- Move selected clips by exact timecode offset
+- Extend clip duration by a chosen amount
+- Better multi-clip movement across tracks
+- More direct text editing workflows
+- Better editing toolbar coverage
+- Customizable keyboard shortcuts and hotkeys in settings
+
+## Phase 3: Workflow Expansion
+
+ComfyStudio is not just an editor. It is also a generation environment. This phase focuses on expanding creative options inside the app.
+
+- Add more built-in workflows
+- Expand both local and cloud workflow coverage
+- Improve workflow discovery and usability
+- Add stronger workflow grouping by use case
+- Improve setup guidance for models, nodes, and dependencies
+- Continue building workflows for image, video, audio, and hybrid pipelines
+
+## Phase 4: Music Video Generation
+
+One of the most exciting directions for ComfyStudio is turning it into a more complete system for music-driven creative output.
+
+This phase is focused on building a dedicated music video generation workflow that can help creators move from concept to sequence faster.
+
+Areas we want to explore:
+
+- Music-driven generation workflows
+- Faster shot ideation for songs and visual themes
+- Better sequencing between generated clips and edit decisions
+- Tools that support rhythm, pacing, and structure
+- A smoother path from generated visuals to a finished music video timeline
+
+This area is still being shaped and will likely grow based on experimentation and creator feedback.
+
+## Phase 5: Creative Automation and Higher-Level Tools
+
+Beyond individual workflows, we want ComfyStudio to become a stronger creative system for structured generation and editing.
+
+Longer-term areas of interest include:
+
+- Smarter sequence building
+- Better AI-assisted edit preparation
+- More advanced shot planning tools
+- Stronger automation between prompts, assets, and timeline structure
+- Better project templates for repeatable creative workflows
+
+## Product Principles
+
+As ComfyStudio grows, we want to stay grounded in a few principles:
+
+- The editor should feel fast and intuitive
+- Generation should support the edit, not interrupt it
+- Powerful features should still feel accessible
+- Local-first creative workflows should remain a core strength
+- Real user feedback should continue shaping priorities
+
+## Notes
+
+This roadmap is a living document. Priorities may shift as features ship, workflows mature, and new feedback comes in.
+
+If you use ComfyStudio and have thoughts on editing, generation, or workflow design, feedback is always welcome.
