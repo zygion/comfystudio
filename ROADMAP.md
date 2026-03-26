@@ -51,7 +51,8 @@ This phase focuses on features that help experienced editors work faster and wit
 - Better multi-clip movement across tracks
 - More direct text editing workflows
 - Better editing toolbar coverage
-- Customizable keyboard shortcuts and hotkeys in settings
+- Fully customizable keyboard shortcuts and hotkeys in settings
+- Editor keymap profiles with familiar presets such as Premiere Pro, Resolve, and Final Cut Pro
 
 ## Phase 3: Workflow Expansion
 
