@@ -1,4 +1,4 @@
-import { Maximize2, Minimize2, Plus, X, Check, Home, ZoomIn, ZoomOut, Move, Play, Pause, SkipBack, SkipForward, Volume2, Film, Image as ImageIcon, ChevronDown, Grid3X3, Crosshair, Square, Frame, Eye, EyeOff, Layers, Wand2 } from 'lucide-react'
+import { Maximize2, Minimize2, Plus, X, Check, Home, ZoomIn, ZoomOut, Move, Play, Pause, SkipBack, SkipForward, Volume2, Film, Image as ImageIcon, ChevronDown, Grid3X3, Crosshair, Square, Frame, Eye, EyeOff, Layers, Wand2, Camera, Loader2 } from 'lucide-react'
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import useAssetsStore from '../stores/assetsStore'
 import useTimelineStore from '../stores/timelineStore'
@@ -17,6 +17,7 @@ import {
   getPreviewComplexity,
   shouldAutoGeneratePreviewProxy,
 } from '../services/previewCache'
+import { importAsset } from '../services/fileSystem'
 
 /**
  * MaskPreview - Component for previewing mask assets with frame-by-frame playback
@@ -210,6 +211,7 @@ function PreviewPanel() {
   // Context menu state
   const [contextMenu, setContextMenu] = useState(null) // { x, y }
   const [capturingFrameForAI, setCapturingFrameForAI] = useState(false)
+  const [capturingStillFrame, setCapturingStillFrame] = useState(false)
   
   const setFrameForAI = useFrameForAIStore((s) => s.setFrame)
   
@@ -222,6 +224,7 @@ function PreviewPanel() {
     assets,
     currentPreview, 
     clearPreview,
+    addAsset,
     volume,
     registerVideoRef,
     setIsPlaying: setAssetIsPlaying,
@@ -376,6 +379,7 @@ function PreviewPanel() {
   
   // Track if we just added to timeline
   const [justAdded, setJustAdded] = useState(false)
+  const [justCapturedStill, setJustCapturedStill] = useState(false)
   
   // Fullscreen state
   const [isFullscreen, setIsFullscreen] = useState(false)
@@ -1204,6 +1208,75 @@ function PreviewPanel() {
     const secs = Math.floor(seconds % 60)
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`
   }
+
+  const formatCaptureTimecode = useCallback((seconds) => {
+    const fps = Math.max(1, Math.round(Number(timelineFps) || 24))
+    const totalFrames = Math.max(0, Math.round(Number(seconds || 0) * fps))
+    const hours = Math.floor(totalFrames / (fps * 3600))
+    const minutes = Math.floor((totalFrames % (fps * 3600)) / (fps * 60))
+    const secs = Math.floor((totalFrames % (fps * 60)) / fps)
+    const frames = totalFrames % fps
+    return [hours, minutes, secs, frames].map((value) => String(value).padStart(2, '0')).join('-')
+  }, [timelineFps])
+
+  const handleCaptureStill = useCallback(async () => {
+    if (previewMode !== 'timeline' || capturingStillFrame) return
+
+    const top = getTopmostVideoOrImageClipAtTime(playheadPosition)
+    if (!top) return
+
+    setContextMenu(null)
+    setCapturingStillFrame(true)
+
+    try {
+      const result = await captureTimelineFrameAt(playheadPosition)
+      if (!result?.file) return
+
+      const captureTimecode = formatCaptureTimecode(playheadPosition)
+      const fileName = `timeline_still_${captureTimecode}.png`
+      const stillFile = new File([result.file], fileName, {
+        type: result.file.type || 'image/png',
+        lastModified: Date.now(),
+      })
+      const previewUrl = result.blobUrl || URL.createObjectURL(stillFile)
+      const displayName = `Still ${captureTimecode.replace(/-/g, ':')}`
+
+      if (currentProjectHandle) {
+        const assetInfo = await importAsset(currentProjectHandle, stillFile, 'images')
+        addAsset({
+          ...assetInfo,
+          name: displayName,
+          type: 'image',
+          url: previewUrl,
+          isImported: true,
+          settings: {
+            capturedAt: playheadPosition,
+            source: 'timeline-still',
+          },
+        })
+      } else {
+        addAsset({
+          name: displayName,
+          type: 'image',
+          url: previewUrl,
+          size: stillFile.size,
+          mimeType: stillFile.type,
+          isImported: false,
+          settings: {
+            capturedAt: playheadPosition,
+            source: 'timeline-still',
+          },
+        })
+      }
+
+      setJustCapturedStill(true)
+      setTimeout(() => setJustCapturedStill(false), 2000)
+    } catch (err) {
+      console.error('Failed to capture still frame:', err)
+    } finally {
+      setCapturingStillFrame(false)
+    }
+  }, [previewMode, capturingStillFrame, playheadPosition, formatCaptureTimecode, currentProjectHandle, addAsset])
   
   // Transport controls for fullscreen
   const goToStart = () => seekTo(0)
@@ -1282,6 +1355,9 @@ function PreviewPanel() {
         })
         break
       }
+      case 'capture-still':
+        handleCaptureStill()
+        break
       case 'zoom-100':
         setZoom(100)
         setPan({ x: 0, y: 0 })
@@ -1531,6 +1607,36 @@ function PreviewPanel() {
             {currentPreview ? `Preview - ${currentPreview.name}` : 'Preview'}
             {isFullscreen && <span className="ml-2 text-sf-text-muted">(Press ESC to exit)</span>}
           </span>
+
+          {previewMode === 'timeline' && getTopmostVideoOrImageClipAtTime(playheadPosition) && (
+            <button
+              onClick={handleCaptureStill}
+              disabled={capturingStillFrame}
+              className={`flex items-center gap-1.5 px-2 py-1 rounded transition-colors text-xs ${
+                justCapturedStill
+                  ? 'text-sf-success bg-sf-success/10'
+                  : 'text-sf-text-muted hover:bg-sf-dark-700'
+              } disabled:opacity-50`}
+              title="Capture a still frame from the preview into project assets"
+            >
+              {capturingStillFrame ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                  <span>Saving Still...</span>
+                </>
+              ) : justCapturedStill ? (
+                <>
+                  <Check className="w-3.5 h-3.5" />
+                  <span>Still Saved</span>
+                </>
+              ) : (
+                <>
+                  <Camera className="w-3.5 h-3.5" />
+                  <span>Still</span>
+                </>
+              )}
+            </button>
+          )}
           
           {/* Info Overlay Toggle */}
           <button
@@ -2364,8 +2470,16 @@ function PreviewPanel() {
           {previewMode === 'timeline' && getTopmostVideoOrImageClipAtTime(playheadPosition) && (
             <>
               <button
+                onClick={() => handleContextAction('capture-still')}
+                disabled={capturingStillFrame}
+                className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 transition-colors disabled:opacity-50"
+              >
+                <Camera className="w-3.5 h-3.5 text-sf-accent" />
+                <span>{capturingStillFrame ? 'Saving Still...' : 'Capture Still'}</span>
+              </button>
+              <button
                 onClick={() => handleContextAction('extend-with-ai')}
-                disabled={capturingFrameForAI}
+                disabled={capturingFrameForAI || capturingStillFrame}
                 className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 transition-colors disabled:opacity-50"
               >
                 <Wand2 className="w-3.5 h-3.5 text-sf-accent" />
@@ -2373,7 +2487,7 @@ function PreviewPanel() {
               </button>
               <button
                 onClick={() => handleContextAction('keyframe-for-ai')}
-                disabled={capturingFrameForAI}
+                disabled={capturingFrameForAI || capturingStillFrame}
                 className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 transition-colors disabled:opacity-50"
               >
                 <Wand2 className="w-3.5 h-3.5 text-sf-accent" />
