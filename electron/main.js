@@ -26,6 +26,25 @@ let exportWorkerWindow = null
 let restoreFullscreenAfterMinimize = false
 const settingsPath = path.join(app.getPath('userData'), 'settings.json')
 
+function getWindowState() {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return {
+      isMaximized: false,
+      isFullScreen: false,
+    }
+  }
+
+  return {
+    isMaximized: mainWindow.isMaximized(),
+    isFullScreen: mainWindow.isFullScreen(),
+  }
+}
+
+function sendWindowState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send('window:stateChanged', getWindowState())
+}
+
 function setSplashStatus(text) {
   if (!splashWindow || splashWindow.isDestroyed()) return
   const escaped = JSON.stringify(String(text))
@@ -127,7 +146,9 @@ ipcMain.handle('window:minimize', () => {
 
 ipcMain.handle('window:toggleMaximize', () => {
   if (!mainWindow) return false
-  if (mainWindow.isMaximized()) {
+  if (mainWindow.isFullScreen()) {
+    mainWindow.setFullScreen(false)
+  } else if (mainWindow.isMaximized()) {
     mainWindow.unmaximize()
   } else {
     mainWindow.maximize()
@@ -144,6 +165,10 @@ ipcMain.handle('window:close', () => {
 
 ipcMain.handle('window:isMaximized', () => {
   return mainWindow ? mainWindow.isMaximized() : false
+})
+
+ipcMain.handle('window:getState', () => {
+  return getWindowState()
 })
 
 ipcMain.handle('window:toggleFullScreen', () => {
@@ -260,6 +285,11 @@ async function createWindow() {
       mainWindow.setFullScreen(true)
     }, 0)
   })
+
+  mainWindow.on('maximize', sendWindowState)
+  mainWindow.on('unmaximize', sendWindowState)
+  mainWindow.on('enter-full-screen', sendWindowState)
+  mainWindow.on('leave-full-screen', sendWindowState)
   
   // Register keyboard shortcut for DevTools (F12 or Ctrl+Shift+I)
   mainWindow.webContents.on('before-input-event', (event, input) => {

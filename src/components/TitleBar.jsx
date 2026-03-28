@@ -1,5 +1,5 @@
-import { Fragment } from 'react'
-import { Minus, Square, X } from 'lucide-react'
+import { Fragment, useEffect, useState } from 'react'
+import { Copy, Minus, Square, X } from 'lucide-react'
 
 const TOP_TABS = [
   { id: 'editor', label: 'Editor' },
@@ -19,6 +19,46 @@ function TitleBar({
   showComfyUiTab = false,
 }) {
   const tabs = showComfyUiTab ? TOP_TABS : TOP_TABS.filter(t => t.id !== 'comfyui')
+  const [windowState, setWindowState] = useState({
+    isMaximized: false,
+    isFullScreen: false,
+  })
+
+  useEffect(() => {
+    let mounted = true
+    let unsubscribe = null
+
+    const loadWindowState = async () => {
+      try {
+        const nextState = await window.electronAPI?.getWindowState?.()
+        if (mounted && nextState) {
+          setWindowState({
+            isMaximized: Boolean(nextState.isMaximized),
+            isFullScreen: Boolean(nextState.isFullScreen),
+          })
+        }
+      } catch (_) {
+        // Ignore missing Electron bridge/state fetch errors in non-Electron contexts.
+      }
+    }
+
+    loadWindowState()
+
+    unsubscribe = window.electronAPI?.onWindowStateChanged?.((nextState) => {
+      if (!mounted || !nextState) return
+      setWindowState({
+        isMaximized: Boolean(nextState.isMaximized),
+        isFullScreen: Boolean(nextState.isFullScreen),
+      })
+    })
+
+    return () => {
+      mounted = false
+      unsubscribe?.()
+    }
+  }, [])
+
+  const isRestoreDown = windowState.isMaximized || windowState.isFullScreen
 
   const handleMinimize = () => {
     window.electronAPI?.minimizeWindow?.()
@@ -80,9 +120,13 @@ function TitleBar({
         <button
           onClick={handleToggleMaximize}
           className="no-drag w-10 h-10 flex items-center justify-center hover:bg-sf-dark-700 transition-colors"
-          title="Maximize"
+          title={isRestoreDown ? 'Restore Down' : 'Maximize'}
         >
-          <Square className="w-3 h-3 text-sf-text-secondary" />
+          {isRestoreDown ? (
+            <Copy className="w-3 h-3 text-sf-text-secondary" />
+          ) : (
+            <Square className="w-3 h-3 text-sf-text-secondary" />
+          )}
         </button>
         <button
           onClick={handleCloseWindow}

@@ -595,6 +595,7 @@ function Timeline({ onOpenAudioGenerate }) {
     moveClip,
     moveSelectedClips,
     setSelectedClipsStartTimes,
+    setSelectedClipPositions,
     resizeClip,
     updateClipTrim,
     updateAudioClipProperties,
@@ -635,11 +636,34 @@ function Timeline({ onOpenAudioGenerate }) {
     addAdjustmentClip,
   } = useTimelineStore()
 
-  const { currentProjectHandle, getCurrentTimelineSettings } = useProjectStore()
+  const {
+    currentProjectHandle,
+    getCurrentTimelineSettings,
+    undoTimelineStructureChange,
+    redoTimelineStructureChange,
+    canUndoTimelineStructureChange,
+    canRedoTimelineStructureChange,
+    projectHistoryLastChangedAt,
+  } = useProjectStore()
   const timelineFps = getCurrentTimelineSettings()?.fps
   const timecodeFps = Number.isFinite(Number(timelineFps)) && Number(timelineFps) > 0
     ? Number(timelineFps)
     : FRAME_RATE
+  const projectCanUndo = canUndoTimelineStructureChange()
+  const projectCanRedo = canRedoTimelineStructureChange()
+  const timelineHistoryLastChangedAt = useTimelineStore((state) => state.historyLastChangedAt)
+  const handleUndoAction = useCallback(() => {
+    if (projectCanUndo && (!canUndo() || projectHistoryLastChangedAt >= timelineHistoryLastChangedAt)) {
+      return undoTimelineStructureChange()
+    }
+    return undo()
+  }, [projectCanUndo, canUndo, projectHistoryLastChangedAt, timelineHistoryLastChangedAt, undoTimelineStructureChange, undo])
+  const handleRedoAction = useCallback(() => {
+    if (projectCanRedo && (!canRedo() || projectHistoryLastChangedAt >= timelineHistoryLastChangedAt)) {
+      return redoTimelineStructureChange()
+    }
+    return redo()
+  }, [projectCanRedo, canRedo, projectHistoryLastChangedAt, timelineHistoryLastChangedAt, redoTimelineStructureChange, redo])
   const markerHotkeyLabel = formatEditorHotkey(editorHotkeys[EDITOR_HOTKEY_IDS.ADD_MARKER])
   const splitAllHotkeyLabel = formatEditorHotkey(editorHotkeys[EDITOR_HOTKEY_IDS.SPLIT_ALL])
   const splitActiveHotkeyLabel = formatEditorHotkey(editorHotkeys[EDITOR_HOTKEY_IDS.SPLIT_ACTIVE])
@@ -845,6 +869,58 @@ function Timeline({ onOpenAudioGenerate }) {
   // Filtered tracks by type (moved up for use in effects)
   const videoTracks = tracks.filter(t => t.type === 'video')
   const audioTracks = tracks.filter(t => t.type === 'audio')
+
+  const getClipTrackFamily = useCallback((clip) => {
+    if (clip?.type === 'audio') return 'audio'
+    return 'video'
+  }, [])
+
+  const getTracksForFamily = useCallback((family) => (
+    family === 'audio' ? audioTracks : videoTracks
+  ), [audioTracks, videoTracks])
+
+  const getHoveredTrackIdForFamily = useCallback((relativeY, family) => {
+    const relevantTracks = getTracksForFamily(family)
+    if (relevantTracks.length === 0) return null
+
+    const audioSectionHeight = 20
+    const totalVideoTracksHeight = videoTracks.reduce((sum, track) => sum + getTrackHeight(track), 0)
+    let currentY = family === 'video' ? 0 : totalVideoTracksHeight + audioSectionHeight
+
+    for (const track of relevantTracks) {
+      const height = getTrackHeight(track)
+      if (relativeY >= currentY && relativeY < currentY + height) {
+        return track.locked ? null : track.id
+      }
+      currentY += height
+    }
+
+    return null
+  }, [getTracksForFamily, videoTracks, trackHeights])
+
+  const getResolvedGroupTrackDelta = useCallback((originalPositions, requestedDelta) => {
+    const numericDelta = Number(requestedDelta)
+    if (!Number.isFinite(numericDelta) || numericDelta === 0) return 0
+
+    const step = numericDelta > 0 ? -1 : 1
+    for (
+      let candidate = Math.trunc(numericDelta);
+      numericDelta > 0 ? candidate >= 0 : candidate <= 0;
+      candidate += step
+    ) {
+      const isValid = originalPositions.every((entry) => {
+        const relevantTracks = getTracksForFamily(entry.family)
+        const originalIndex = relevantTracks.findIndex((track) => track.id === entry.trackId)
+        if (originalIndex < 0) return false
+        const nextTrack = relevantTracks[originalIndex + candidate]
+        return Boolean(nextTrack && !nextTrack.locked)
+      })
+
+      if (isValid) return candidate
+    }
+
+    return 0
+  }, [getTracksForFamily])
 
   // Calculate time from mouse position
   const getTimeFromMouseEvent = (e) => {
@@ -1371,14 +1447,14 @@ function Timeline({ onOpenAudioGenerate }) {
       if ((e.ctrlKey || e.metaKey) && !e.shiftKey && key === 'z') {
         if (moveOffsetDialogOpen || durationDeltaDialogOpen) return
         e.preventDefault()
-        undo()
+        handleUndoAction()
         return
       }
 
       if ((e.ctrlKey || e.metaKey) && ((e.shiftKey && key === 'z') || key === 'y')) {
         if (moveOffsetDialogOpen || durationDeltaDialogOpen) return
         e.preventDefault()
-        redo()
+        handleRedoAction()
         return
       }
 
@@ -1500,7 +1576,7 @@ function Timeline({ onOpenAudioGenerate }) {
     return () => {
       window.removeEventListener('keydown', handleKeyDown)
     }
-  }, [toggleSnapping, toggleRippleEdit, addMarker, selectedClipIds, selectedTransitionId, selectedMarkerId, removeSelectedClips, removeTransition, removeMarker, clearSelection, selectMarker, clips, undo, redo, activeTrackId, playheadPosition, saveToHistory, resizeClip, addClip, addTextClip, addAdjustmentClip, updateClipTrim, assets, timelineFps, copySelectedClips, pasteClipsAtPlayhead, copiedClips, selectClipsFromPlayheadToEnd, selectClipsFromTimelineStartToPlayhead, splitClipAtTime, splitAllTracksAtPlayhead, openMoveOffsetDialog, openDurationDeltaDialog, moveOffsetDialogOpen, durationDeltaDialogOpen, editorHotkeys])
+  }, [toggleSnapping, toggleRippleEdit, addMarker, selectedClipIds, selectedTransitionId, selectedMarkerId, removeSelectedClips, removeTransition, removeMarker, clearSelection, selectMarker, clips, handleUndoAction, handleRedoAction, activeTrackId, playheadPosition, saveToHistory, resizeClip, addClip, addTextClip, addAdjustmentClip, updateClipTrim, assets, timelineFps, copySelectedClips, pasteClipsAtPlayhead, copiedClips, selectClipsFromPlayheadToEnd, selectClipsFromTimelineStartToPlayhead, splitClipAtTime, splitAllTracksAtPlayhead, openMoveOffsetDialog, openDurationDeltaDialog, moveOffsetDialogOpen, durationDeltaDialogOpen, editorHotkeys])
 
   // Spacebar panning key state (dedicated listeners so keyup cannot get "stuck")
   useEffect(() => {
@@ -2490,7 +2566,12 @@ function Timeline({ onOpenAudioGenerate }) {
       originalTrackId: clip.trackId,
       hasMoved: false,
       lastDeltaTime: 0,
-      originalPositions: clipsToMove.map(c => ({ id: c.id, startTime: c.startTime }))
+      originalPositions: clipsToMove.map((c) => ({
+        id: c.id,
+        startTime: c.startTime,
+        trackId: c.trackId,
+        family: getClipTrackFamily(c),
+      }))
     })
     
     // Only change selection if this clip isn't already selected
@@ -2579,47 +2660,63 @@ function Timeline({ onOpenAudioGenerate }) {
         clearActiveSnap()
       }
       
-      // Handle vertical track switching (only for single clip drag)
+      // Handle vertical track switching
       let newTrackId = clipDragState.originalTrackId
       const isDraggingMultiple = selectedClipIds.includes(clipDragState.clipId) && selectedClipIds.length > 1
+      let groupTrackDelta = 0
       
       // Use track content ref for Y (scrollable area where tracks live)
-      if (!isDraggingMultiple && trackContentRef.current) {
+      if (trackContentRef.current) {
         const contentRect = trackContentRef.current.getBoundingClientRect()
         const relativeY = e.clientY - contentRect.top + trackContentRef.current.scrollTop
-        
-        // Image/text/adjustment clips stay on video tracks; only pure audio clips map to audio tracks
-        const trackType = (clip.type === 'image' || clip.type === 'text' || clip.type === 'adjustment') ? 'video' : (clip.type || 'video')
-        const relevantTracks = tracks.filter(t => t.type === trackType)
-        const audioSectionHeight = 20
-        const totalVideoTracksHeight = videoTracks.reduce((sum, track) => sum + getTrackHeight(track), 0)
-        
-        let currentY = trackType === 'video' ? 0 : totalVideoTracksHeight + audioSectionHeight
-        
-        for (const track of relevantTracks) {
-          const height = getTrackHeight(track)
-          if (relativeY >= currentY && relativeY < currentY + height) {
-            if (!track.locked) newTrackId = track.id
-            break
+
+        if (isDraggingMultiple) {
+          const primaryOriginal = clipDragState.originalPositions.find((entry) => entry.id === clipDragState.clipId)
+          if (primaryOriginal) {
+            const primaryTracks = getTracksForFamily(primaryOriginal.family)
+            const hoveredTrackId = getHoveredTrackIdForFamily(relativeY, primaryOriginal.family)
+            const originalIndex = primaryTracks.findIndex((track) => track.id === primaryOriginal.trackId)
+            const targetIndex = primaryTracks.findIndex((track) => track.id === hoveredTrackId)
+
+            if (originalIndex >= 0 && targetIndex >= 0) {
+              groupTrackDelta = getResolvedGroupTrackDelta(
+                clipDragState.originalPositions,
+                targetIndex - originalIndex
+              )
+            }
+
+            const primaryTargetTrack = primaryTracks[originalIndex + groupTrackDelta]
+            if (primaryTargetTrack && !primaryTargetTrack.locked) {
+              newTrackId = primaryTargetTrack.id
+            }
           }
-          currentY += height
+        } else {
+          const hoveredTrackId = getHoveredTrackIdForFamily(relativeY, getClipTrackFamily(clip))
+          if (hoveredTrackId) newTrackId = hoveredTrackId
         }
       }
       
       // Update clip position(s) - don't resolve overlaps during drag, only on mouse up
       if (isDraggingMultiple) {
-        // Set all selected clips to original + total delta; keep group in sequence at timeline start
-        const proposed = clipDragState.originalPositions.map(({ id, startTime }) => ({
+        // Set all selected clips to original + total delta and preserve their relative track layout.
+        const proposed = clipDragState.originalPositions.map(({ id, startTime, trackId, family }) => {
+          const relevantTracks = getTracksForFamily(family)
+          const originalIndex = relevantTracks.findIndex((track) => track.id === trackId)
+          const targetTrack = originalIndex >= 0 ? relevantTracks[originalIndex + groupTrackDelta] : null
+          return {
           id,
-          startTime: startTime + finalDeltaTime
-        }))
+          startTime: startTime + finalDeltaTime,
+          trackId: targetTrack?.id || trackId,
+        }
+        })
         const minStart = Math.min(...proposed.map((p) => p.startTime))
         const shift = minStart < 0 ? -minStart : 0
-        const updates = proposed.map(({ id, startTime }) => ({
+        const updates = proposed.map(({ id, startTime, trackId }) => ({
           id,
-          startTime: Math.max(0, startTime + shift)
+          startTime: Math.max(0, startTime + shift),
+          trackId,
         }))
-        setSelectedClipsStartTimes(updates)
+        setSelectedClipPositions(updates)
         setClipDragState(prev => ({ ...prev, currentTrackId: newTrackId }))
       } else {
         // Move single clip (no overlap resolution yet)
@@ -2657,7 +2754,7 @@ function Timeline({ onOpenAudioGenerate }) {
       window.removeEventListener('mousemove', handleMouseMove)
       window.removeEventListener('mouseup', handleMouseUp)
     }
-  }, [clipDragState, trimState, slipState, clips, pixelsPerSecond, tracks, videoTracks, moveClip, moveSelectedClips, setSelectedClipsStartTimes, selectedClipIds, snapClipPosition, setActiveSnapTime, clearActiveSnap, saveToHistory])
+  }, [clipDragState, trimState, slipState, clips, pixelsPerSecond, moveClip, moveSelectedClips, setSelectedClipPositions, selectedClipIds, snapClipPosition, setActiveSnapTime, clearActiveSnap, saveToHistory, getClipTrackFamily, getHoveredTrackIdForFamily, getResolvedGroupTrackDelta, getTracksForFamily])
 
   // Handle adding transition between adjacent clips - show type menu
   const handleAddTransition = (e, clipA, clipB) => {

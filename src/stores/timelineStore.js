@@ -293,6 +293,7 @@ export const useTimelineStore = create(
   // Undo/Redo history
   history: [], // Array of past states
   historyIndex: -1, // Current position in history (-1 means at present state)
+  historyLastChangedAt: 0,
   
   /**
    * Save current state to history (call before making changes)
@@ -321,7 +322,8 @@ export const useTimelineStore = create(
       return {
         history: newHistory,
         // New edits always represent present-time state (outside the history stack).
-        historyIndex: -1
+        historyIndex: -1,
+        historyLastChangedAt: Date.now(),
       }
     })
   },
@@ -366,6 +368,7 @@ export const useTimelineStore = create(
         markerCounter: lastHistoryState.markerCounter || 1,
         history: historyWithCurrent,
         historyIndex: targetHistoryIndex,
+        historyLastChangedAt: Date.now(),
         selectedClipIds: [], // Clear selection on undo
         selectedTransitionId: null,
         selectedMarkerId: null,
@@ -385,6 +388,7 @@ export const useTimelineStore = create(
         transitionCounter: prevState.transitionCounter,
         markerCounter: prevState.markerCounter || 1,
         historyIndex: state.historyIndex - 1,
+        historyLastChangedAt: Date.now(),
         selectedClipIds: [], // Clear selection on undo
         selectedTransitionId: null,
         selectedMarkerId: null,
@@ -412,6 +416,7 @@ export const useTimelineStore = create(
         transitionCounter: nextState.transitionCounter,
         markerCounter: nextState.markerCounter || 1,
         historyIndex: state.historyIndex + 1,
+        historyLastChangedAt: Date.now(),
         selectedClipIds: [], // Clear selection on redo
         selectedTransitionId: null,
         selectedMarkerId: null,
@@ -442,7 +447,7 @@ export const useTimelineStore = create(
    * Clear history (e.g., on project clear)
    */
   clearHistory: () => {
-    set({ history: [], historyIndex: -1 })
+    set({ history: [], historyIndex: -1, historyLastChangedAt: 0 })
   },
 
   /**
@@ -1252,15 +1257,30 @@ export const useTimelineStore = create(
    * @param {Array<{ id: string, startTime: number }>} updates - Per-clip start times for selected clips
    */
   setSelectedClipsStartTimes: (updates) => {
+    get().setSelectedClipPositions(updates)
+  },
+
+  /**
+   * Set positions of selected clips to given values (used for multi-clip drag so motion stays 1:1 with mouse).
+   * @param {Array<{ id: string, startTime: number, trackId?: string }>} updates - Per-clip position updates
+   */
+  setSelectedClipPositions: (updates) => {
     const state = get()
     const fps = state.timelineFps || 24
-    const map = new Map(updates.map((u) => [u.id, roundToFrame(Math.max(0, u.startTime), fps)]))
+    const map = new Map(updates.map((u) => [u.id, {
+      startTime: roundToFrame(Math.max(0, u.startTime), fps),
+      trackId: typeof u.trackId === 'string' ? u.trackId : undefined,
+    }]))
     set((state) => ({
       clips: state.clips.map((clip) => {
         if (!state.selectedClipIds.includes(clip.id)) return clip
-        const newStart = map.get(clip.id)
-        if (newStart === undefined) return clip
-        return { ...clip, startTime: newStart }
+        const nextPosition = map.get(clip.id)
+        if (!nextPosition) return clip
+        return {
+          ...clip,
+          startTime: nextPosition.startTime,
+          trackId: nextPosition.trackId ?? clip.trackId,
+        }
       })
     }))
   },
@@ -3729,6 +3749,7 @@ export const useTimelineStore = create(
       // Clear undo/redo history
       history: [],
       historyIndex: -1,
+      historyLastChangedAt: 0,
     })
   },
 
@@ -3795,6 +3816,7 @@ export const useTimelineStore = create(
       // Clear history on load
       history: [],
       historyIndex: -1,
+      historyLastChangedAt: 0,
       // Clear preview proxy (different timeline or state)
       previewProxyStatus: 'none',
       previewProxyPath: null,

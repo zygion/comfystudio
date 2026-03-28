@@ -237,8 +237,18 @@ export default function OverlayGeneratorModal({
   initialType = 'letterbox',
   replaceAssetId = null,
   initialValues = null,
+  availableTypes = ['letterbox', 'vignette', 'color', 'grain'],
 }) {
-  const [type, setType] = useState(initialType)
+  const overlayTypeOptions = useMemo(() => ([
+    { id: 'letterbox', label: 'Letterbox', icon: Layout },
+    { id: 'vignette', label: 'Vignette', icon: Circle },
+    { id: 'color', label: 'Color matte', icon: Palette },
+    { id: 'grain', label: 'Film grain', icon: Sparkles },
+  ]).filter(({ id }) => availableTypes.includes(id)), [availableTypes])
+  const safeInitialType = overlayTypeOptions.some(({ id }) => id === initialType)
+    ? initialType
+    : (overlayTypeOptions[0]?.id || 'letterbox')
+  const [type, setType] = useState(safeInitialType)
   const [name, setName] = useState('')
   const [useTimelineSize, setUseTimelineSize] = useState(true)
   const [customWidth, setCustomWidth] = useState(1920)
@@ -260,7 +270,7 @@ export default function OverlayGeneratorModal({
 
   useEffect(() => {
     if (!isOpen) return
-    setType(initialType)
+    setType(safeInitialType)
     setName(typeof initialValues?.name === 'string' ? initialValues.name : '')
 
     const timelineWidth = Math.max(1, Math.min(4096, Math.round(Number(timelineSize?.width) || 1920)))
@@ -286,7 +296,7 @@ export default function OverlayGeneratorModal({
     setGrainDuration(clampNumber(initialValues?.grainDuration, 1, 20, 3))
     setGrainFps(clampNumber(initialValues?.grainFps, 10, 30, 12))
     setError(null)
-  }, [isOpen, initialType, initialValues, timelineSize?.width, timelineSize?.height])
+  }, [isOpen, safeInitialType, initialValues, timelineSize?.width, timelineSize?.height])
 
   const width = useTimelineSize ? (timelineSize?.width ?? 1920) : customWidth
   const height = useTimelineSize ? (timelineSize?.height ?? 1080) : customHeight
@@ -427,12 +437,7 @@ export default function OverlayGeneratorModal({
           <div>
             <label className="text-[10px] text-sf-text-muted block mb-1.5">Type</label>
             <div className="flex gap-1 p-0.5 bg-sf-dark-900 rounded">
-              {[
-                { id: 'letterbox', label: 'Letterbox', icon: Layout },
-                { id: 'vignette', label: 'Vignette', icon: Circle },
-                { id: 'color', label: 'Color matte', icon: Palette },
-                { id: 'grain', label: 'Film grain', icon: Sparkles },
-              ].map(({ id, label, icon: Icon }) => (
+              {overlayTypeOptions.map(({ id, label, icon: Icon }) => (
                 <button
                   key={id}
                   type="button"

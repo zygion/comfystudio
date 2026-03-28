@@ -300,6 +300,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   toggleFullScreenWindow: () => ipcRenderer.invoke('window:toggleFullScreen'),
   closeWindow: () => ipcRenderer.invoke('window:close'),
   isWindowMaximized: () => ipcRenderer.invoke('window:isMaximized'),
+  getWindowState: () => ipcRenderer.invoke('window:getState'),
+  onWindowStateChanged: (cb) => {
+    const handler = (_, state) => cb(state)
+    ipcRenderer.on('window:stateChanged', handler)
+    return () => ipcRenderer.removeListener('window:stateChanged', handler)
+  },
 })
 
 // Also expose a simple check for detecting Electron

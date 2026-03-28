@@ -1,4 +1,4 @@
-import { Upload, FolderOpen, Image, Video, Music, Search, Grid, List, Trash2, Edit3, Play, FileVideo, FileAudio, FileImage, Loader2, FolderPlus, ChevronRight, ChevronDown, ChevronLeft, Home, Minus, Plus, MoreVertical, FolderInput, Wand2, Layers, Film, VolumeX, Volume2, ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react'
+import { Upload, FolderOpen, Image, Video, Music, Search, Grid, List, Trash2, Edit3, Play, FileVideo, FileAudio, FileImage, Loader2, FolderPlus, ChevronRight, ChevronDown, ChevronLeft, Home, Minus, Plus, MoreVertical, FolderInput, Wand2, Layers, Film, VolumeX, Volume2, ArrowUpDown, ArrowUp, ArrowDown, Copy } from 'lucide-react'
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import useAssetsStore from '../../stores/assetsStore'
 import useProjectStore from '../../stores/projectStore'
@@ -8,6 +8,7 @@ import { enqueuePlaybackTranscode } from '../../services/playbackCache'
 import MaskGenerationDialog from '../MaskGenerationDialog'
 import OverlayGeneratorModal from '../OverlayGeneratorModal'
 import ConfirmDialog from '../ConfirmDialog'
+import NewTimelineDialog from '../NewTimelineDialog'
 
 // Thumbnail size presets (xs = extra small for denser grid)
 const THUMBNAIL_SIZES = {
@@ -41,6 +42,7 @@ function AssetsPanel() {
   const [thumbnailSize, setThumbnailSize] = useState('medium')
   const [searchQuery, setSearchQuery] = useState('')
   const [editingId, setEditingId] = useState(null)
+  const [editingType, setEditingType] = useState(null)
   const [editName, setEditName] = useState('')
   const [isImporting, setIsImporting] = useState(false)
   const [isDragOver, setIsDragOver] = useState(false)
@@ -53,7 +55,7 @@ function AssetsPanel() {
   const [currentFolderId, setCurrentFolderId] = useState(null) // null = root
   const [showNewFolderInput, setShowNewFolderInput] = useState(false)
   const [newFolderName, setNewFolderName] = useState('')
-  const [contextMenu, setContextMenu] = useState(null) // { x, y, assetId?, folderId? }
+  const [contextMenu, setContextMenu] = useState(null) // { x, y, assetId?, folderId?, sequenceId? }
   const newFolderInputRef = useRef(null)
   
   // Mask generation state
@@ -63,10 +65,13 @@ function AssetsPanel() {
   const [overlayModalInitialType, setOverlayModalInitialType] = useState('letterbox')
   const [overlayModalFolderId, setOverlayModalFolderId] = useState(null) // when opened from folder context menu
   const [confirmDialog, setConfirmDialog] = useState(null) // { title, message, confirmLabel, cancelLabel, tone }
+  const [showNewTimelineDialog, setShowNewTimelineDialog] = useState(false)
   const confirmResolverRef = useRef(null)
   
   // Selected assets (array for multi-select; used for delete and drag-to-folder)
   const [selectedAssetIds, setSelectedAssetIds] = useState([])
+  const [selectedSequenceId, setSelectedSequenceId] = useState(null)
+  const [openingSequenceId, setOpeningSequenceId] = useState(null)
   const [dragOverFolderId, setDragOverFolderId] = useState(null) // 'root' | folderId for drop highlight
   // List view: which folder IDs are expanded to show contents inline
   const [expandedFolderIds, setExpandedFolderIds] = useState(() => new Set())
@@ -198,6 +203,7 @@ function AssetsPanel() {
     assets, 
     currentPreview, 
     setPreview, 
+    setPreviewMode,
     removeAsset, 
     renameAsset, 
     addAsset,
@@ -213,7 +219,7 @@ function AssetsPanel() {
     getAssetSprite,
     setAssetAudioEnabled,
   } = useAssetsStore()
-  const { currentProjectHandle, getCurrentTimelineSettings } = useProjectStore()
+  const { currentProject, currentProjectHandle, currentTimelineId, switchTimeline, renameTimeline, setTimelineColor, duplicateTimeline, deleteTimeline, getCurrentTimelineSettings } = useProjectStore()
   const { isPlaying: timelineIsPlaying, togglePlay: timelineTogglePlay, removeAudioClipsForAsset } = useTimelineStore()
   
   // Load thumbnail size from localStorage
@@ -363,6 +369,8 @@ function AssetsPanel() {
   // Get current folder and its subfolders
   const currentFolder = currentFolderId ? folders?.find(f => f.id === currentFolderId) : null
   const subFolders = (folders || []).filter(f => f.parentId === currentFolderId)
+  const projectTimelines = currentProject?.timelines || []
+  const showRootSequences = currentFolderId == null && projectTimelines.length > 0
   
   // Filter assets by current folder and search query
   const filteredAssets = assets.filter(asset => {
@@ -372,6 +380,15 @@ function AssetsPanel() {
       asset.prompt?.toLowerCase().includes(searchQuery.toLowerCase())
     return matchesFolder && matchesSearch
   })
+
+  const filteredTimelines = useMemo(() => {
+    if (!showRootSequences) return []
+    const normalizedQuery = searchQuery.trim().toLowerCase()
+    if (!normalizedQuery) return projectTimelines
+    return projectTimelines.filter((timeline) => (
+      timeline?.name?.toLowerCase().includes(normalizedQuery)
+    ))
+  }, [projectTimelines, searchQuery, showRootSequences])
   
   // Get subfolders by parent (for list view expand)
   const getSubfoldersOf = (parentId) => (folders || []).filter(f => f.parentId === parentId)
@@ -497,15 +514,45 @@ function AssetsPanel() {
     return date.toLocaleDateString()
   }
 
+  const formatSequenceDuration = (seconds) => {
+    const totalSeconds = Math.max(0, Math.round(Number(seconds) || 0))
+    const hours = Math.floor(totalSeconds / 3600)
+    const minutes = Math.floor((totalSeconds % 3600) / 60)
+    const secs = totalSeconds % 60
+
+    if (hours > 0) {
+      return `${hours}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')}`
+    }
+
+    return `${minutes}:${String(secs).padStart(2, '0')}`
+  }
+
   // Asset value getters for sorting and display
   const getAssetSource = (a) => (a.isImported ? 'IMP' : 'AI')
   const getAssetDate = (a) => new Date(a.createdAt || a.imported || 0).getTime()
+  const getTimelineDate = (timeline) => new Date(timeline?.modified || timeline?.created || 0).getTime()
   const getAssetTypeLabel = (a) => {
     if (a.type === 'mask') return 'Mask'
     if (a.type === 'video') return 'Video'
     if (a.type === 'image') return 'Image'
     if (a.type === 'audio') return 'Audio'
     return a.type || '—'
+  }
+  const getBrowserItemName = (entry) => {
+    if (entry.kind === 'sequence') return entry.item?.name || 'Untitled Sequence'
+    return entry.item?.name || ''
+  }
+  const getBrowserItemTypeLabel = (entry) => {
+    if (entry.kind === 'sequence') return 'Sequence'
+    return getAssetTypeLabel(entry.item)
+  }
+  const getBrowserItemSource = (entry) => {
+    if (entry.kind === 'sequence') return 'SEQ'
+    return getAssetSource(entry.item)
+  }
+  const getBrowserItemDate = (entry) => {
+    if (entry.kind === 'sequence') return getTimelineDate(entry.item)
+    return getAssetDate(entry.item)
   }
 
   const sortAssets = (list) => {
@@ -522,6 +569,33 @@ function AssetsPanel() {
     })
   }
 
+  const sortBrowserItems = (list) => {
+    const { by, dir } = listSortBy
+    const mult = dir === 'asc' ? 1 : -1
+    return [...list].sort((a, b) => {
+      let va, vb
+      switch (by) {
+        case 'name':
+          va = getBrowserItemName(a).toLowerCase()
+          vb = getBrowserItemName(b).toLowerCase()
+          return mult * (va < vb ? -1 : va > vb ? 1 : 0)
+        case 'type':
+          va = getBrowserItemTypeLabel(a)
+          vb = getBrowserItemTypeLabel(b)
+          return mult * (va < vb ? -1 : va > vb ? 1 : 0)
+        case 'source':
+          va = getBrowserItemSource(a)
+          vb = getBrowserItemSource(b)
+          return mult * (va < vb ? -1 : va > vb ? 1 : 0)
+        case 'date':
+        default:
+          va = getBrowserItemDate(a)
+          vb = getBrowserItemDate(b)
+          return mult * (va - vb)
+      }
+    })
+  }
+
   // Handle double-click to preview
   const handleDoubleClick = (asset) => {
     if (timelineIsPlaying) {
@@ -532,6 +606,7 @@ function AssetsPanel() {
   
   // Handle single-click to select and preview (with multi-select: Ctrl/Cmd toggle, Shift range)
   const handleClick = (e, asset) => {
+    setSelectedSequenceId(null)
     if (timelineIsPlaying) {
       timelineTogglePlay()
     }
@@ -555,6 +630,30 @@ function AssetsPanel() {
     }
     setSelectedAssetIds([asset.id])
     setPreview(asset)
+  }
+
+  const handleSequenceClick = (timeline) => {
+    if (!timeline?.id) return
+    setSelectedSequenceId(timeline.id)
+    setSelectedAssetIds([])
+  }
+
+  const handleSequenceDoubleClick = async (timeline) => {
+    if (!timeline?.id) return
+    setSelectedSequenceId(timeline.id)
+    setSelectedAssetIds([])
+    if (timelineIsPlaying) {
+      timelineTogglePlay()
+    }
+    setPreviewMode('timeline')
+    if (timeline.id === currentTimelineId) return
+
+    setOpeningSequenceId(timeline.id)
+    try {
+      await switchTimeline(timeline.id)
+    } finally {
+      setOpeningSequenceId(null)
+    }
   }
 
   const requestConfirm = useCallback(({
@@ -626,22 +725,40 @@ function AssetsPanel() {
   
   // Handle folder click
   const handleFolderClick = (folderId) => {
+    setSelectedSequenceId(null)
     setCurrentFolderId(folderId)
   }
 
   // Start editing name
   const startEditing = (e, asset) => {
     e.stopPropagation()
+    setEditingType('asset')
     setEditingId(asset.id)
     setEditName(asset.name)
+  }
+
+  const startSequenceEditing = (e, timeline) => {
+    e?.stopPropagation?.()
+    if (!timeline?.id) return
+    setContextMenu(null)
+    setEditingType('sequence')
+    setEditingId(timeline.id)
+    setEditName(timeline.name || '')
+    setSelectedSequenceId(timeline.id)
+    setSelectedAssetIds([])
   }
 
   // Save edited name
   const saveEdit = (e) => {
     e.preventDefault()
     if (editName.trim() && editingId) {
-      renameAsset(editingId, editName.trim())
+      if (editingType === 'sequence') {
+        renameTimeline(editingId, editName.trim())
+      } else {
+        renameAsset(editingId, editName.trim())
+      }
     }
+    setEditingType(null)
     setEditingId(null)
     setEditName('')
   }
@@ -716,9 +833,18 @@ function AssetsPanel() {
     setContextMenu({ x: e.clientX, y: e.clientY, assetId: null, folderId })
   }
 
+  const handleSequenceContextMenu = (e, timeline) => {
+    e.preventDefault()
+    e.stopPropagation()
+    if (!timeline?.id) return
+    setSelectedSequenceId(timeline.id)
+    setSelectedAssetIds([])
+    setContextMenu({ x: e.clientX, y: e.clientY, assetId: null, folderId: null, sequenceId: timeline.id })
+  }
+
   // Handle context menu on empty area (right-click on background / empty spot)
   const handleEmptyAreaContextMenu = (e) => {
-    if (e.target.closest('[data-is-asset], [data-is-folder]')) return
+    if (e.target.closest('[data-is-asset], [data-is-folder], [data-is-sequence]')) return
     e.preventDefault()
     e.stopPropagation()
     setContextMenu({ x: e.clientX, y: e.clientY, assetId: null, folderId: null })
@@ -732,6 +858,62 @@ function AssetsPanel() {
   const handleEmptyMenuImport = () => {
     setContextMenu(null)
     openFilePicker()
+  }
+  const handleEmptyMenuNewTimeline = () => {
+    setContextMenu(null)
+    setShowNewTimelineDialog(true)
+  }
+
+  const handleTimelineCreatedFromAssets = useCallback((timeline) => {
+    if (!timeline?.id) return
+    setCurrentFolderId(null)
+    setSelectedAssetIds([])
+    setSelectedSequenceId(timeline.id)
+    setPreviewMode('timeline')
+  }, [setPreviewMode])
+
+  const handleOpenSequenceFromContextMenu = async (timeline) => {
+    setContextMenu(null)
+    await handleSequenceDoubleClick(timeline)
+  }
+
+  const handleDuplicateSequence = async (timeline) => {
+    if (!timeline?.id) return
+    setContextMenu(null)
+    const newTimeline = duplicateTimeline(timeline.id)
+    if (!newTimeline?.id) return
+    setCurrentFolderId(null)
+    setSelectedAssetIds([])
+    setSelectedSequenceId(newTimeline.id)
+    setPreviewMode('timeline')
+    await switchTimeline(newTimeline.id)
+  }
+
+  const handleDeleteSequence = async (timeline) => {
+    if (!timeline?.id) return
+    const timelineCount = currentProject?.timelines?.length || 0
+    if (timelineCount <= 1) {
+      setContextMenu(null)
+      return
+    }
+    const confirmed = await requestConfirm({
+      title: 'Delete timeline?',
+      message: `Delete timeline "${timeline.name || 'Untitled Sequence'}"?`,
+      confirmLabel: 'Delete timeline',
+      cancelLabel: 'Keep',
+      tone: 'danger',
+    })
+    if (!confirmed) return
+
+    setContextMenu(null)
+    const deletingCurrent = timeline.id === currentTimelineId
+    const deleted = deleteTimeline(timeline.id)
+    if (!deleted) return
+    setSelectedAssetIds([])
+    setSelectedSequenceId(deletingCurrent ? (useProjectStore.getState().currentTimelineId || null) : null)
+    if (!deletingCurrent) {
+      setPreviewMode('timeline')
+    }
   }
   
   // Close context menu when clicking outside
@@ -806,6 +988,10 @@ function AssetsPanel() {
       newFolderInputRef.current.focus()
     }
   }, [showNewFolderInput])
+
+  useEffect(() => {
+    setSelectedSequenceId(currentTimelineId || null)
+  }, [currentTimelineId])
   
   // Get thumbnail size config
   const sizeConfig = THUMBNAIL_SIZES[thumbnailSize]
@@ -815,6 +1001,177 @@ function AssetsPanel() {
     ? assets.find((asset) => asset.id === assetDragPreview.assetId) || null
     : null
   const DragPreviewIcon = dragPreviewAsset ? getIcon(dragPreviewAsset.type) : null
+  const hasVisibleSequences = filteredTimelines.length > 0
+  const isPanelEmpty = filteredAssets.length === 0 && subFolders.length === 0 && !hasVisibleSequences
+  const rootBrowserItems = [
+    ...filteredTimelines.map((timeline) => ({ kind: 'sequence', item: timeline })),
+    ...filteredAssets.map((asset) => ({ kind: 'asset', item: asset })),
+  ]
+  const sortedRootBrowserItems = sortBrowserItems(rootBrowserItems)
+
+  const renderSequenceGridItem = (timeline) => {
+    const isCurrent = timeline.id === currentTimelineId
+    const isSelected = timeline.id === selectedSequenceId
+    const isEditing = editingType === 'sequence' && editingId === timeline.id
+    const clipCount = Array.isArray(timeline.clips) ? timeline.clips.length : 0
+    const trackCount = Array.isArray(timeline.tracks) ? timeline.tracks.length : 0
+    const timelineColor = timeline.color ?? null
+
+    return (
+      <div
+        key={timeline.id}
+        data-is-sequence
+        onClick={() => handleSequenceClick(timeline)}
+        onDoubleClick={() => handleSequenceDoubleClick(timeline)}
+        onContextMenu={(e) => handleSequenceContextMenu(e, timeline)}
+        className={`bg-sf-dark-800 border rounded overflow-hidden text-left transition-all cursor-pointer group ${
+          isCurrent
+            ? 'border-sf-accent ring-1 ring-sf-accent'
+            : isSelected
+              ? 'border-sf-dark-500 bg-sf-dark-800'
+              : 'border-sf-dark-600 hover:border-sf-dark-500'
+        }`}
+        style={timelineColor ? { borderLeftWidth: '4px', borderLeftColor: timelineColor } : {}}
+      >
+        <div className="aspect-video relative overflow-hidden bg-gradient-to-br from-sf-dark-700 via-sf-dark-800 to-sf-dark-900 flex items-center justify-center">
+          <div className="absolute inset-x-0 top-3 flex justify-center opacity-20">
+            <div className="h-px w-3/4 bg-sf-accent" />
+          </div>
+          <div className="absolute inset-x-0 bottom-3 flex justify-center opacity-20">
+            <div className="h-px w-3/4 bg-sf-accent" />
+          </div>
+          <div className="rounded-full bg-sf-dark-900/80 p-3 shadow-lg">
+            <Film className={`${sizeConfig.iconSize} text-sf-accent`} />
+          </div>
+
+          <div className={`absolute top-0.5 left-0.5 px-1 py-0.5 rounded ${sizeConfig.badgeSize} text-white font-medium bg-sf-accent/90`}>
+            SEQ
+          </div>
+
+          <div className="absolute top-0.5 right-0.5 flex items-center gap-0.5">
+            <button
+              type="button"
+              onClick={(e) => startSequenceEditing(e, timeline)}
+              className={`p-0.5 rounded bg-sf-dark-800/90 hover:bg-sf-dark-700 transition-opacity ${
+                isSelected || isEditing ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+              }`}
+              title="Rename sequence"
+            >
+              <Edit3 className="w-2.5 h-2.5 text-sf-text-muted" />
+            </button>
+            {isCurrent && (
+              <div className={`px-1 py-0.5 rounded ${sizeConfig.badgeSize} text-black font-medium bg-sf-text-primary/90`}>
+                ACTIVE
+              </div>
+            )}
+          </div>
+
+          {openingSequenceId === timeline.id && (
+            <div className="absolute bottom-0.5 left-0.5 px-1 py-0.5 rounded bg-sf-dark-800/90">
+              <Loader2 className="w-2 h-2 text-sf-blue animate-spin" />
+            </div>
+          )}
+
+          <div className="pointer-events-none absolute inset-0 bg-black/0 group-hover:bg-black/15 transition-colors" />
+        </div>
+
+        <div className="p-1.5">
+          {isEditing ? (
+            <form onSubmit={saveEdit}>
+              <input
+                type="text"
+                value={editName}
+                onChange={(e) => setEditName(e.target.value)}
+                onBlur={saveEdit}
+                autoFocus
+                className={`w-full bg-sf-dark-700 border border-sf-accent rounded px-1 py-0.5 ${sizeConfig.nameSize} text-sf-text-primary focus:outline-none`}
+              />
+            </form>
+          ) : (
+            <p className={`${sizeConfig.nameSize} text-sf-text-primary truncate`} title={timeline.name || 'Untitled Sequence'}>
+              {timeline.name || 'Untitled Sequence'}
+            </p>
+          )}
+          <p className={`${sizeConfig.infoSize} text-sf-text-muted mt-0.5`}>
+            {clipCount} clip{clipCount === 1 ? '' : 's'} • {trackCount} track{trackCount === 1 ? '' : 's'}
+          </p>
+          <p className={`${sizeConfig.infoSize} text-sf-text-muted`}>
+            {formatSequenceDuration(timeline.duration)} • {formatTime(timeline.modified || timeline.created)}
+          </p>
+        </div>
+      </div>
+    )
+  }
+
+  const renderSequenceListRow = (timeline) => {
+    const isCurrent = timeline.id === currentTimelineId
+    const isSelected = timeline.id === selectedSequenceId
+    const isEditing = editingType === 'sequence' && editingId === timeline.id
+    const timelineColor = timeline.color ?? null
+
+    return (
+      <div
+        key={timeline.id}
+        data-is-sequence
+        onClick={() => handleSequenceClick(timeline)}
+        onDoubleClick={() => handleSequenceDoubleClick(timeline)}
+        onContextMenu={(e) => handleSequenceContextMenu(e, timeline)}
+        className={`grid ${listDetailsGridColumns} gap-1 items-center px-1.5 py-1 rounded cursor-pointer transition-colors group ${
+          isCurrent
+            ? 'bg-sf-accent/20 ring-1 ring-sf-accent/40'
+            : isSelected
+              ? 'bg-sf-dark-800'
+              : 'hover:bg-sf-dark-800'
+        }`}
+        style={timelineColor ? { borderLeft: `3px solid ${timelineColor}` } : {}}
+      >
+        <div className="flex items-center gap-2 min-w-0">
+          <div className="w-7 h-7 rounded overflow-hidden bg-sf-dark-700 flex-shrink-0 flex items-center justify-center">
+            <Film className="w-3.5 h-3.5 text-sf-accent" />
+          </div>
+          <div className="min-w-0 flex-1">
+            {isEditing ? (
+              <form onSubmit={saveEdit} className="min-w-0 flex-1">
+                <input
+                  type="text"
+                  value={editName}
+                  onChange={(e) => setEditName(e.target.value)}
+                  onBlur={saveEdit}
+                  autoFocus
+                  className="w-full bg-sf-dark-700 border border-sf-accent rounded px-1 py-0.5 text-[10px] text-sf-text-primary focus:outline-none"
+                />
+              </form>
+            ) : (
+              <span className="text-[11px] text-sf-text-primary truncate block">{timeline.name || 'Untitled Sequence'}</span>
+            )}
+          </div>
+        </div>
+        <span className="text-[10px] text-sf-text-muted truncate">Sequence</span>
+        <span className="text-[9px] font-medium px-1 py-0.5 rounded bg-sf-accent/90 text-white">SEQ</span>
+        <span className="text-[10px] text-sf-text-muted truncate" title={timeline.modified || timeline.created}>
+          {formatTime(timeline.modified || timeline.created)}
+        </span>
+        <div className="flex items-center justify-end gap-1">
+          <button
+            type="button"
+            onClick={(e) => startSequenceEditing(e, timeline)}
+            className="p-0.5 opacity-0 group-hover:opacity-100 hover:bg-sf-dark-700 rounded transition-opacity"
+            title="Rename sequence"
+          >
+            <Edit3 className="w-2.5 h-2.5 text-sf-text-muted" />
+          </button>
+          {isCurrent && (
+            <span className="rounded bg-sf-accent px-1.5 py-0.5 text-[9px] font-medium text-black">
+              Active
+            </span>
+          )}
+          {openingSequenceId === timeline.id && (
+            <Loader2 className="w-3 h-3 animate-spin text-sf-text-muted" />
+          )}
+        </div>
+      </div>
+    )
+  }
 
   // List view: recursive folder row with expand arrow and inline contents
   const ListFolderRow = ({ folder, depth }) => {
@@ -1101,11 +1458,13 @@ function AssetsPanel() {
           }
         }}
       >
-        {filteredAssets.length === 0 && subFolders.length === 0 ? (
+        {isPanelEmpty ? (
           <div className="empty-state-container h-full flex flex-col items-center justify-center text-sf-text-muted">
             <Video className="w-10 h-10 mb-2 opacity-50" />
-            <p className="text-xs">No assets yet</p>
-            <p className="text-[10px] mt-1">Generate AI videos or import your footage</p>
+            <p className="text-xs">{searchQuery.trim() ? 'No matching assets or sequences' : 'No assets yet'}</p>
+            <p className="text-[10px] mt-1">
+              {searchQuery.trim() ? 'Try a different search or clear the filter.' : 'Generate AI videos or import your footage'}
+            </p>
             <div className="flex gap-2 mt-3">
               <button
                 onClick={openFilePicker}
@@ -1138,7 +1497,10 @@ function AssetsPanel() {
             {/* Back button if in a folder */}
             {currentFolderId && (
               <button
-                onClick={() => setCurrentFolderId(currentFolder?.parentId || null)}
+                onClick={() => {
+                  setSelectedSequenceId(null)
+                  setCurrentFolderId(currentFolder?.parentId || null)
+                }}
                 className="aspect-video bg-sf-dark-800 border border-sf-dark-600 rounded flex flex-col items-center justify-center hover:border-sf-dark-500 transition-colors"
               >
                 <ChevronLeft className={`${sizeConfig.iconSize} text-sf-text-muted mb-1`} />
@@ -1175,8 +1537,13 @@ function AssetsPanel() {
               </div>
             ))}
             
-            {/* Assets */}
-            {filteredAssets.map((asset) => {
+            {/* Root items: sequences mixed with assets */}
+            {(currentFolderId == null ? rootBrowserItems : filteredAssets.map((asset) => ({ kind: 'asset', item: asset }))).map((entry) => {
+              if (entry.kind === 'sequence') {
+                return renderSequenceGridItem(entry.item)
+              }
+
+              const asset = entry.item
               const Icon = getIcon(asset.type)
               const isSelected = selectedAssetIds.includes(asset.id) || currentPreview?.id === asset.id
               const idsToMove = selectedAssetIds.includes(asset.id) ? selectedAssetIds : [asset.id]
@@ -1319,7 +1686,10 @@ function AssetsPanel() {
             {/* Back button if in a folder */}
             {currentFolderId && (
               <button
-                onClick={() => setCurrentFolderId(currentFolder?.parentId || null)}
+                onClick={() => {
+                  setSelectedSequenceId(null)
+                  setCurrentFolderId(currentFolder?.parentId || null)
+                }}
                 className="w-full flex items-center gap-2 p-1.5 rounded hover:bg-sf-dark-800 transition-colors flex-shrink-0"
               >
                 <ChevronLeft className="w-3.5 h-3.5 text-sf-text-muted" />
@@ -1350,8 +1720,13 @@ function AssetsPanel() {
               <ListFolderRow key={folder.id} folder={folder} depth={0} />
             ))}
             
-            {/* Assets in current folder - sorted, details columns */}
-            {sortAssets(filteredAssets).map((asset) => {
+            {/* Root items: sequences mixed with assets */}
+            {(currentFolderId == null ? sortedRootBrowserItems : sortAssets(filteredAssets).map((asset) => ({ kind: 'asset', item: asset }))).map((entry) => {
+              if (entry.kind === 'sequence') {
+                return renderSequenceListRow(entry.item)
+              }
+
+              const asset = entry.item
               const Icon = getIcon(asset.type)
               const isSelected = selectedAssetIds.includes(asset.id) || currentPreview?.id === asset.id
               const idsToMove = selectedAssetIds.includes(asset.id) ? selectedAssetIds : [asset.id]
@@ -1411,6 +1786,12 @@ function AssetsPanel() {
           </div>
         )}
       </div>
+
+      <NewTimelineDialog
+        isOpen={showNewTimelineDialog}
+        onClose={() => setShowNewTimelineDialog(false)}
+        onCreated={handleTimelineCreatedFromAssets}
+      />
 
       {/* Asset drag thumbnail: shown only while cursor remains over Assets panel */}
       {dragPreviewAsset && assetDragPreview && (
@@ -1490,9 +1871,79 @@ function AssetsPanel() {
                 Delete folder
               </button>
             </>
+          ) : contextMenu.sequenceId ? (
+            <>
+              {(() => {
+                const timeline = projectTimelines.find((entry) => entry.id === contextMenu.sequenceId)
+                const timelineCount = projectTimelines.length
+                if (!timeline) return null
+
+                return (
+                  <>
+                    <div className="px-3 py-1 text-[10px] text-sf-text-muted uppercase tracking-wider">Color</div>
+                    <div className="px-2 py-1 flex flex-wrap gap-1">
+                      {COLOR_PALETTE.map((c) => (
+                        <button
+                          key={c ?? 'none'}
+                          type="button"
+                          onClick={() => {
+                            setTimelineColor(timeline.id, c)
+                            setContextMenu(null)
+                          }}
+                          className={`w-5 h-5 rounded border-2 flex-shrink-0 flex items-center justify-center ${(timeline.color ?? null) === c ? 'border-white scale-110' : 'border-sf-dark-600 hover:border-sf-dark-500'} ${!c ? 'bg-sf-dark-600' : ''}`}
+                          style={c ? { backgroundColor: c } : {}}
+                          title={c ? c : 'None'}
+                        >
+                          {!c && <Minus className="w-3 h-3 text-sf-text-muted" />}
+                        </button>
+                      ))}
+                    </div>
+                    <div className="border-t border-sf-dark-600 my-1" />
+                    <button
+                      onClick={() => handleOpenSequenceFromContextMenu(timeline)}
+                      className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
+                    >
+                      <Play className="w-3 h-3 text-sf-accent" />
+                      Open
+                    </button>
+                    <button
+                      onClick={(e) => startSequenceEditing(e, timeline)}
+                      className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
+                    >
+                      <Edit3 className="w-3 h-3 text-sf-accent" />
+                      Rename
+                    </button>
+                    <button
+                      onClick={() => handleDuplicateSequence(timeline)}
+                      className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
+                    >
+                      <Copy className="w-3 h-3 text-sf-accent" />
+                      Duplicate
+                    </button>
+                    <div className="border-t border-sf-dark-600 my-1" />
+                    <button
+                      onClick={() => handleDeleteSequence(timeline)}
+                      disabled={timelineCount <= 1}
+                      className="w-full px-3 py-1.5 text-left text-xs text-sf-error hover:bg-sf-dark-700 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <Trash2 className="w-3 h-3" />
+                      Delete
+                    </button>
+                  </>
+                )
+              })()}
+            </>
           ) : contextMenu.assetId == null ? (
             /* Empty area: New Folder, Import, Create overlay */
             <>
+              <button
+                onClick={handleEmptyMenuNewTimeline}
+                disabled={!currentProject}
+                className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <Film className="w-3 h-3 text-sf-accent" />
+                Create New Timeline...
+              </button>
               <button
                 onClick={handleEmptyMenuNewFolder}
                 className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
@@ -1518,25 +1969,11 @@ function AssetsPanel() {
                 Letterbox overlay…
               </button>
               <button
-                onClick={() => { openOverlayGenerator('vignette', null); setContextMenu(null) }}
-                className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
-              >
-                <span className="w-4 text-center">◐</span>
-                Vignette overlay…
-              </button>
-              <button
                 onClick={() => { openOverlayGenerator('color', null); setContextMenu(null) }}
                 className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
               >
                 <span className="w-4 text-center">■</span>
                 Color matte…
-              </button>
-              <button
-                onClick={() => { openOverlayGenerator('grain', null); setContextMenu(null) }}
-                className="w-full px-3 py-1.5 text-left text-xs text-sf-text-primary hover:bg-sf-dark-700 flex items-center gap-2"
-              >
-                <span className="w-4 text-center">◇</span>
-                Film grain loop…
               </button>
             </>
           ) : (
@@ -1676,7 +2113,7 @@ function AssetsPanel() {
         />
       )}
 
-      {/* Overlay generator (letterbox, vignette, color matte, film grain) */}
+      {/* Overlay generator (currently letterbox and color matte only) */}
       <OverlayGeneratorModal
         isOpen={overlayModalOpen}
         onClose={closeOverlayModal}
@@ -1714,6 +2151,7 @@ function AssetsPanel() {
         timelineSize={getCurrentTimelineSettings() ? { width: getCurrentTimelineSettings().width, height: getCurrentTimelineSettings().height } : { width: 1920, height: 1080 }}
         defaultFolderId={overlayModalFolderId ?? currentFolderId}
         initialType={overlayModalInitialType}
+        availableTypes={['letterbox', 'color']}
       />
       
       {/* Footer with asset count */}

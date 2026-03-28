@@ -8,7 +8,36 @@ function BottomBar({ onOpenSettings, onOpenGettingStarted, projectName }) {
   const menuRef = useRef(null)
 
   const { undo, redo, canUndo, canRedo } = useTimelineStore()
-  const { saveProject, closeProject } = useProjectStore()
+  const timelineHistoryLastChangedAt = useTimelineStore((state) => state.historyLastChangedAt)
+  const {
+    saveProject,
+    closeProject,
+    undoTimelineStructureChange,
+    redoTimelineStructureChange,
+    canUndoTimelineStructureChange,
+    canRedoTimelineStructureChange,
+    projectHistoryLastChangedAt,
+  } = useProjectStore()
+  const projectCanUndo = canUndoTimelineStructureChange()
+  const projectCanRedo = canRedoTimelineStructureChange()
+  const combinedCanUndo = projectCanUndo || canUndo()
+  const combinedCanRedo = projectCanRedo || canRedo()
+
+  const handleUndo = () => {
+    if (projectCanUndo && (!canUndo() || projectHistoryLastChangedAt >= timelineHistoryLastChangedAt)) {
+      undoTimelineStructureChange()
+      return
+    }
+    undo()
+  }
+
+  const handleRedo = () => {
+    if (projectCanRedo && (!canRedo() || projectHistoryLastChangedAt >= timelineHistoryLastChangedAt)) {
+      redoTimelineStructureChange()
+      return
+    }
+    redo()
+  }
 
   useEffect(() => {
     if (!menuOpen) return
@@ -64,8 +93,8 @@ function BottomBar({ onOpenSettings, onOpenGettingStarted, projectName }) {
     <div className="h-8 flex-shrink-0 bg-black border-t border-sf-dark-700 flex items-center justify-end px-3 gap-0">
       {/* Undo | Redo | Project name | Settings */}
       <button
-        onClick={() => undo()}
-        disabled={!canUndo()}
+        onClick={handleUndo}
+        disabled={!combinedCanUndo}
         className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-bold text-white hover:bg-sf-dark-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         title="Undo (Ctrl+Z)"
       >
@@ -73,8 +102,8 @@ function BottomBar({ onOpenSettings, onOpenGettingStarted, projectName }) {
       </button>
       <Separator />
       <button
-        onClick={() => redo()}
-        disabled={!canRedo()}
+        onClick={handleRedo}
+        disabled={!combinedCanRedo}
         className="flex items-center gap-1.5 px-2 py-1 rounded text-[11px] font-bold text-white hover:bg-sf-dark-800 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
         title="Redo (Ctrl+Shift+Z)"
       >

@@ -50,6 +50,7 @@ export const FPS_PRESETS = [
 const createDefaultTimeline = (name = 'Timeline 1', id = null, settings = null) => ({
   id: id || `timeline-${Date.now()}`,
   name,
+  color: settings?.color || null,
   created: new Date().toISOString(),
   modified: new Date().toISOString(),
   // Timeline-specific resolution and frame rate (optional - falls back to project settings if null)
@@ -70,6 +71,31 @@ const createDefaultTimeline = (name = 'Timeline 1', id = null, settings = null) 
   snappingThreshold: 10,
   rippleEditMode: false,
 })
+
+const MAX_PROJECT_HISTORY_SIZE = 25
+
+const cloneProjectHistoryValue = (value) => JSON.parse(JSON.stringify(value))
+
+const createTimelineStructureSnapshot = (state) => {
+  if (!state?.currentProject) return null
+
+  const liveTimelineData = useTimelineStore.getState().getProjectData()
+  const timelines = (state.currentProject.timelines || []).map((timeline) => (
+    timeline.id === state.currentTimelineId
+      ? { ...timeline, ...liveTimelineData }
+      : timeline
+  ))
+
+  return {
+    timelines: cloneProjectHistoryValue(timelines),
+    currentTimelineId: state.currentTimelineId,
+  }
+}
+
+const areTimelineStructureSnapshotsEqual = (a, b) => {
+  if (!a || !b) return false
+  return JSON.stringify(a) === JSON.stringify(b)
+}
 
 /**
  * Helper to get display name from path or handle
@@ -100,6 +126,9 @@ export const useProjectStore = create(
       currentProject: null, // { name, settings, created, modified, timelines, currentTimelineId }
       currentProjectHandle: null, // FileSystemDirectoryHandle (web) or string path (Electron) - not persisted
       currentTimelineId: null, // ID of the currently active timeline
+      projectHistory: [], // Timeline-structure snapshots for create/duplicate/rename/delete
+      projectFuture: [],
+      projectHistoryLastChangedAt: 0,
       
       // Default projects location
       defaultProjectsLocation: null, // Path string for display
@@ -317,6 +346,9 @@ export const useProjectStore = create(
             currentProject: projectData,
             currentProjectHandle: projectHandleOrPath,
             currentTimelineId: defaultTimeline.id,
+            projectHistory: [],
+            projectFuture: [],
+            projectHistoryLastChangedAt: 0,
             recentProjects: [recentProject, ...state.recentProjects.filter(p => p.name !== name)].slice(0, 10),
             isLoading: false,
           }))
@@ -407,6 +439,9 @@ export const useProjectStore = create(
             currentProject: projectData,
             currentProjectHandle: projectHandleOrPath,
             currentTimelineId: currentTimeline.id,
+            projectHistory: [],
+            projectFuture: [],
+            projectHistoryLastChangedAt: 0,
             recentProjects: [recentProject, ...state.recentProjects.filter(p => p.name !== projectData.name)].slice(0, 10),
             isLoading: false,
           }))
@@ -495,6 +530,112 @@ export const useProjectStore = create(
           return false
         }
       },
+
+      saveTimelineStructureToHistory: () => {
+        const state = get()
+        const snapshot = createTimelineStructureSnapshot(state)
+        if (!snapshot) return false
+
+        let changed = false
+        set((currentState) => {
+          const lastSnapshot = currentState.projectHistory[currentState.projectHistory.length - 1]
+          if (lastSnapshot && areTimelineStructureSnapshotsEqual(lastSnapshot, snapshot)) {
+            return {}
+          }
+
+          changed = true
+          const nextHistory = [...currentState.projectHistory, snapshot].slice(-MAX_PROJECT_HISTORY_SIZE)
+          return {
+            projectHistory: nextHistory,
+            projectFuture: [],
+            projectHistoryLastChangedAt: Date.now(),
+          }
+        })
+
+        return changed
+      },
+
+      undoTimelineStructureChange: () => {
+        const state = get()
+        if (!state.currentProject || state.projectHistory.length === 0) return false
+
+        const currentSnapshot = createTimelineStructureSnapshot(state)
+        const targetSnapshot = state.projectHistory[state.projectHistory.length - 1]
+        const remainingHistory = state.projectHistory.slice(0, -1)
+        const nextFuture = currentSnapshot
+          && !areTimelineStructureSnapshotsEqual(state.projectFuture[state.projectFuture.length - 1], currentSnapshot)
+          ? [...state.projectFuture, currentSnapshot]
+          : [...state.projectFuture]
+
+        const nextTimelineId = targetSnapshot.currentTimelineId
+          || targetSnapshot.timelines?.[0]?.id
+          || null
+        const nextTimelines = cloneProjectHistoryValue(targetSnapshot.timelines || [])
+        const nextTimeline = nextTimelines.find((timeline) => timeline.id === nextTimelineId) || nextTimelines[0] || null
+        if (nextTimeline) {
+          const timelineFps = nextTimeline?.fps || state.currentProject?.settings?.fps || 24
+          useTimelineStore.getState().loadFromProject(nextTimeline, useAssetsStore.getState().getProjectData(), timelineFps)
+        }
+
+        set((currentState) => ({
+          currentProject: currentState.currentProject ? {
+            ...currentState.currentProject,
+            timelines: nextTimelines,
+            currentTimelineId: nextTimelineId,
+          } : null,
+          currentTimelineId: nextTimelineId,
+          projectHistory: remainingHistory,
+          projectFuture: nextFuture,
+          projectHistoryLastChangedAt: Date.now(),
+        }))
+
+        return true
+      },
+
+      redoTimelineStructureChange: () => {
+        const state = get()
+        if (!state.currentProject || state.projectFuture.length === 0) return false
+
+        const currentSnapshot = createTimelineStructureSnapshot(state)
+        const targetSnapshot = state.projectFuture[state.projectFuture.length - 1]
+        const remainingFuture = state.projectFuture.slice(0, -1)
+        const nextHistory = currentSnapshot
+          && !areTimelineStructureSnapshotsEqual(state.projectHistory[state.projectHistory.length - 1], currentSnapshot)
+          ? [...state.projectHistory, currentSnapshot].slice(-MAX_PROJECT_HISTORY_SIZE)
+          : [...state.projectHistory]
+
+        const nextTimelineId = targetSnapshot.currentTimelineId
+          || targetSnapshot.timelines?.[0]?.id
+          || null
+        const nextTimelines = cloneProjectHistoryValue(targetSnapshot.timelines || [])
+        const nextTimeline = nextTimelines.find((timeline) => timeline.id === nextTimelineId) || nextTimelines[0] || null
+        if (nextTimeline) {
+          const timelineFps = nextTimeline?.fps || state.currentProject?.settings?.fps || 24
+          useTimelineStore.getState().loadFromProject(nextTimeline, useAssetsStore.getState().getProjectData(), timelineFps)
+        }
+
+        set((currentState) => ({
+          currentProject: currentState.currentProject ? {
+            ...currentState.currentProject,
+            timelines: nextTimelines,
+            currentTimelineId: nextTimelineId,
+          } : null,
+          currentTimelineId: nextTimelineId,
+          projectHistory: nextHistory,
+          projectFuture: remainingFuture,
+          projectHistoryLastChangedAt: Date.now(),
+        }))
+
+        return true
+      },
+
+      canUndoTimelineStructureChange: () => get().projectHistory.length > 0,
+      canRedoTimelineStructureChange: () => get().projectFuture.length > 0,
+      clearTimelineStructureHistory: () => set({
+        projectHistory: [],
+        projectFuture: [],
+        projectHistoryLastChangedAt: 0,
+      }),
       
       /**
        * Close the current project
@@ -514,6 +655,9 @@ export const useProjectStore = create(
           currentProject: null,
           currentProjectHandle: null,
           currentTimelineId: null,
+          projectHistory: [],
+          projectFuture: [],
+          projectHistoryLastChangedAt: 0,
         })
       },
       
@@ -617,6 +761,7 @@ export const useProjectStore = create(
       createTimeline: (options = null) => {
         const state = get()
         if (!state.currentProject) return null
+        get().saveTimelineStructureToHistory()
         
         // Handle backward compatibility - if options is a string, treat as name
         const isLegacyCall = typeof options === 'string' || options === null
@@ -625,6 +770,7 @@ export const useProjectStore = create(
           width: options?.width || null,
           height: options?.height || null,
           fps: options?.fps || null,
+          color: options?.color || null,
         }
         
         const existingTimelines = state.currentProject.timelines || []
@@ -650,6 +796,7 @@ export const useProjectStore = create(
       duplicateTimeline: (timelineId) => {
         const state = get()
         if (!state.currentProject?.timelines) return null
+        get().saveTimelineStructureToHistory()
         
         // If duplicating current timeline, save its state first
         if (timelineId === state.currentTimelineId) {
@@ -698,6 +845,7 @@ export const useProjectStore = create(
       renameTimeline: (timelineId, newName) => {
         const state = get()
         if (!state.currentProject?.timelines || !newName.trim()) return false
+        get().saveTimelineStructureToHistory()
         
         set((state) => ({
           currentProject: {
@@ -712,6 +860,34 @@ export const useProjectStore = create(
         
         return true
       },
+
+      /**
+       * Set a timeline color for project browser display
+       * @param {string} timelineId - ID of the timeline to update
+       * @param {string|null} color - Hex color or null
+       */
+      setTimelineColor: (timelineId, color) => {
+        const state = get()
+        if (!state.currentProject?.timelines) return false
+        const existingTimeline = state.currentProject.timelines.find((timeline) => timeline.id === timelineId)
+        if (!existingTimeline) return false
+        if ((existingTimeline.color ?? null) === (color ?? null)) return true
+
+        get().saveTimelineStructureToHistory()
+
+        set((currentState) => ({
+          currentProject: {
+            ...currentState.currentProject,
+            timelines: currentState.currentProject.timelines.map((timeline) =>
+              timeline.id === timelineId
+                ? { ...timeline, color: color ?? null, modified: new Date().toISOString() }
+                : timeline
+            ),
+          },
+        }))
+
+        return true
+      },
       
       /**
        * Delete a timeline
@@ -723,6 +899,7 @@ export const useProjectStore = create(
         
         // Can't delete the last timeline
         if (state.currentProject.timelines.length <= 1) return false
+        get().saveTimelineStructureToHistory()
         
         // If deleting the current timeline, switch to another first
         if (timelineId === state.currentTimelineId) {
