@@ -23,7 +23,7 @@ We should keep updating this file as new features land.
 - Move selected clips by an exact signed offset
 - Change selected clip duration by an exact signed amount
 - Support both timecode and frame-based precision entry in exact-edit dialogs
-- Better multi-clip movement across tracks
+- Multi-clip dragging across tracks now keeps linked and selected groups moving as one stable block, preserves spacing, and resolves crowded drops more predictably
 - Linked audio and video clip pairs for imported media with audio
 - Manual `Link Selected` and `Unlink Selected` actions in the timeline
 - Linked audio/video pair selections can now stay multi-selected while the Inspector switches between focused `Video` and `Audio` controls
@@ -104,6 +104,7 @@ Good visuals to capture for posts, release notes, or short clips:
 - Sequence items mixed directly into the Assets panel
 - Linked video/audio clips moving together across the timeline
 - `Link Selected` / `Unlink Selected` context menu actions
+- Multi-clip drag across several video and audio tracks while linked pairs stay together and snap cleanly without jitter
 - Timeline wheel scrolling and playhead follow during playback
 - Gap targeting highlight on an empty section of a track before ripple-delete lands
 - Ripple delete closing a selected hole on one track without touching others
@@ -127,6 +128,7 @@ Good visuals to capture for posts, release notes, or short clips:
 - Precision editing now supports exact offsets in timecode or frames
 - Timeline workflows are more NLE-like with sequence management inside Assets
 - Linked audio/video clip pairs help keep sync intact while editing
+- Multi-clip drags now feel more dependable because grouped clips keep their layout and stop snapping to themselves
 - Navigation is quicker with wheel scrolling, `+` / `-` zoom, and playhead follow
 - Empty-space targeting lays the groundwork for ripple delete and future gap actions
 - Ripple delete now makes cleanup faster for both clips and selected dead space

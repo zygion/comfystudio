@@ -26,6 +26,28 @@ let exportWorkerWindow = null
 let restoreFullscreenAfterMinimize = false
 const settingsPath = path.join(app.getPath('userData'), 'settings.json')
 
+async function writeFileAtomic(filePath, data, options) {
+  const dir = path.dirname(filePath)
+  await fs.mkdir(dir, { recursive: true })
+
+  const tempPath = path.join(
+    dir,
+    `.${path.basename(filePath)}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`
+  )
+
+  try {
+    await fs.writeFile(tempPath, data, options)
+    await fs.rename(tempPath, filePath)
+  } catch (error) {
+    try {
+      await fs.unlink(tempPath)
+    } catch (_) {
+      // Ignore cleanup failures for temp files.
+    }
+    throw error
+  }
+}
+
 function getWindowState() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return {
@@ -412,10 +434,6 @@ ipcMain.handle('fs:readFileAsBuffer', async (event, filePath) => {
 
 ipcMain.handle('fs:writeFile', async (event, filePath, data, options = {}) => {
   try {
-    // Ensure parent directory exists
-    const dir = path.dirname(filePath)
-    await fs.mkdir(dir, { recursive: true })
-    
     // Handle different data types
     let writeData = data
     if (options.encoding === 'base64') {
@@ -424,8 +442,8 @@ ipcMain.handle('fs:writeFile', async (event, filePath, data, options = {}) => {
       // JSON object
       writeData = JSON.stringify(data, null, 2)
     }
-    
-    await fs.writeFile(filePath, writeData, options.encoding === 'base64' ? null : options)
+
+    await writeFileAtomic(filePath, writeData, options.encoding === 'base64' ? null : options)
     return { success: true }
   } catch (err) {
     return { success: false, error: err.message }
@@ -434,12 +452,8 @@ ipcMain.handle('fs:writeFile', async (event, filePath, data, options = {}) => {
 
 ipcMain.handle('fs:writeFileFromArrayBuffer', async (event, filePath, arrayBuffer) => {
   try {
-    // Ensure parent directory exists
-    const dir = path.dirname(filePath)
-    await fs.mkdir(dir, { recursive: true })
-    
     const buffer = Buffer.from(arrayBuffer)
-    await fs.writeFile(filePath, buffer)
+    await writeFileAtomic(filePath, buffer)
     return { success: true }
   } catch (err) {
     return { success: false, error: err.message }

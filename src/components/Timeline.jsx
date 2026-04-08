@@ -3095,9 +3095,11 @@ function Timeline({ onOpenAudioGenerate }) {
     
     // Store original positions of all selected clips for multi-drag.
     // If the clicked clip belongs to a linked group, include its linked mates so sync is preserved.
-    const clipIdsToMove = selectedClipIds.includes(clip.id)
-      ? selectedClipIds
-      : getLinkedClipIds([clip.id])
+    const clipIdsToMove = [...new Set(
+      selectedClipIds.includes(clip.id)
+        ? selectedClipIds
+        : getLinkedClipIds([clip.id])
+    )]
     const clipsToMove = clips.filter((candidate) => clipIdsToMove.includes(candidate.id))
     clipDragHistorySavedRef.current = false
     
@@ -3110,6 +3112,7 @@ function Timeline({ onOpenAudioGenerate }) {
       hasMoved: false,
       pendingAutoCreateVideoTrack: false,
       lastDeltaTime: 0,
+      movingClipIds: clipIdsToMove,
       originalPositions: clipsToMove.map((c) => ({
         id: c.id,
         startTime: c.startTime,
@@ -3187,13 +3190,14 @@ function Timeline({ onOpenAudioGenerate }) {
       
       const clip = clips.find(c => c.id === clipDragState.clipId)
       if (!clip) return
+      const movingClipIds = clipDragState.movingClipIds || clipDragState.originalPositions.map(({ id }) => id)
       
       // Calculate new start time based on mouse movement
       const deltaTime = deltaX / pixelsPerSecond
       let proposedStartTime = Math.max(0, clipDragState.originalStartTime + deltaTime)
       
       // Apply snapping (only for the primary dragged clip)
-      const snapResult = snapClipPosition(clipDragState.clipId, proposedStartTime, clip.duration)
+      const snapResult = snapClipPosition(movingClipIds, proposedStartTime, clip.duration)
       
       let finalDeltaTime = deltaTime
       if (snapResult.snapped) {
@@ -3206,7 +3210,7 @@ function Timeline({ onOpenAudioGenerate }) {
       
       // Handle vertical track switching
       let newTrackId = clipDragState.originalTrackId
-      const isDraggingMultiple = selectedClipIds.includes(clipDragState.clipId) && selectedClipIds.length > 1
+      const isDraggingMultiple = movingClipIds.length > 1
       let groupTrackDelta = 0
       let pendingAutoCreateVideoTrack = false
       
@@ -3267,7 +3271,7 @@ function Timeline({ onOpenAudioGenerate }) {
           startTime: Math.max(0, startTime + shift),
           trackId,
         }))
-        setSelectedClipPositions(updates)
+        setSelectedClipPositions(updates, movingClipIds)
         setClipDragState(prev => ({
           ...prev,
           currentTrackId: newTrackId,
@@ -3288,7 +3292,8 @@ function Timeline({ onOpenAudioGenerate }) {
     const handleMouseUp = () => {
       // On mouse up, resolve overlaps for the final position (NLE overwrite behavior)
       if (clipDragState && clipDragState.hasMoved) {
-        const isDraggingMultiple = selectedClipIds.includes(clipDragState.clipId) && selectedClipIds.length > 1
+        const movingClipIds = clipDragState.movingClipIds || clipDragState.originalPositions.map(({ id }) => id)
+        const isDraggingMultiple = movingClipIds.length > 1
         if (clipDragState.pendingAutoCreateVideoTrack) {
           const newTrack = addTrack('video')
           if (newTrack) {
@@ -3324,15 +3329,15 @@ function Timeline({ onOpenAudioGenerate }) {
                   trackId: nextTrackId,
                 }
               })
-              setSelectedClipPositions(updates)
-              moveSelectedClips(0, null, true)
+              setSelectedClipPositions(updates, movingClipIds)
+              moveSelectedClips(0, null, true, movingClipIds)
             } else {
               const latestClip = useTimelineStore.getState().clips.find((entry) => entry.id === clipDragState.clipId)
               const finalStartTime = latestClip?.startTime ?? clipDragState.currentStartTime ?? clipDragState.originalStartTime
               moveClip(clipDragState.clipId, newTrack.id, finalStartTime, true)
             }
           } else if (isDraggingMultiple) {
-            moveSelectedClips(0, null, true)
+            moveSelectedClips(0, null, true, movingClipIds)
           } else {
             const clip = clips.find(c => c.id === clipDragState.clipId)
             if (clip) {
@@ -3341,7 +3346,7 @@ function Timeline({ onOpenAudioGenerate }) {
           }
         } else if (isDraggingMultiple) {
           // For multi-clip drag, resolve overlaps with delta of 0 (clips already in position)
-          moveSelectedClips(0, null, true)
+          moveSelectedClips(0, null, true, movingClipIds)
         } else {
           // For single clip drag, resolve overlaps at the current position
           const clip = clips.find(c => c.id === clipDragState.clipId)
@@ -4496,7 +4501,7 @@ function Timeline({ onOpenAudioGenerate }) {
                     } ${trimState?.clipId === clip.id ? 'ring-2 ring-sf-accent' : ''} ${
                       slipState?.clipId === clip.id ? 'ring-2 ring-yellow-400 cursor-ew-resize z-30' : ''
                     } ${
-                      clipDragState && (clipDragState.clipId === clip.id || (selectedClipIds.includes(clip.id) && selectedClipIds.includes(clipDragState.clipId)))
+                      clipDragState?.movingClipIds?.includes(clip.id)
                         ? 'ring-2 ring-sf-accent cursor-grabbing z-30' : ''
                     } ${
                       clipEnabled ? '' : 'opacity-60 saturate-0'
@@ -5169,7 +5174,7 @@ function Timeline({ onOpenAudioGenerate }) {
                     onContextMenu={(e) => handleClipContextMenu(e, clip)}
                     className={`absolute top-0.5 bottom-0.5 rounded-sm cursor-grab group overflow-hidden ${
                       selectedClipIds.includes(clip.id) ? 'ring-2 ring-white ring-offset-1 ring-offset-sf-dark-900' : ''
-                    } ${slipState?.clipId === clip.id ? 'ring-2 ring-yellow-400 cursor-ew-resize z-30' : ''} ${clipDragState && (clipDragState.clipId === clip.id || (selectedClipIds.includes(clip.id) && selectedClipIds.includes(clipDragState.clipId)))
+                    } ${slipState?.clipId === clip.id ? 'ring-2 ring-yellow-400 cursor-ew-resize z-30' : ''} ${clipDragState?.movingClipIds?.includes(clip.id)
                         ? 'ring-2 ring-sf-accent cursor-grabbing z-30' : ''} ${clipEnabled ? '' : 'opacity-60 saturate-0'}`}
                     style={{ 
                       left: `${clip.startTime * pixelsPerSecond}px`, 

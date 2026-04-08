@@ -7,6 +7,7 @@ import {
   createProjectFolder,
   saveProject as saveProjectToFile,
   loadProject as loadProjectFromFile,
+  loadLatestProjectAutosave as loadLatestProjectAutosaveFromFile,
   listProjects,
   storeDirectoryHandle,
   getStoredDirectoryHandle,
@@ -111,6 +112,81 @@ const getDisplayName = (handleOrPath) => {
   return handleOrPath.name
 }
 
+const normalizeOpenedProjectData = (projectData) => {
+  const normalizedProject = { ...(projectData || {}) }
+
+  if (normalizedProject.timeline && !normalizedProject.timelines) {
+    const migratedTimeline = {
+      ...normalizedProject.timeline,
+      id: 'timeline-1',
+      name: 'Timeline 1',
+      created: normalizedProject.created,
+      modified: normalizedProject.modified,
+    }
+    normalizedProject.timelines = [migratedTimeline]
+    normalizedProject.currentTimelineId = migratedTimeline.id
+    delete normalizedProject.timeline
+  }
+
+  if (!normalizedProject.timelines || normalizedProject.timelines.length === 0) {
+    normalizedProject.timelines = [createDefaultTimeline('Timeline 1')]
+    normalizedProject.currentTimelineId = normalizedProject.timelines[0].id
+  }
+
+  const currentTimelineId = normalizedProject.currentTimelineId || normalizedProject.timelines[0].id
+  const currentTimeline = normalizedProject.timelines.find((timeline) => timeline.id === currentTimelineId) || normalizedProject.timelines[0]
+
+  return {
+    projectData: normalizedProject,
+    currentTimelineId,
+    currentTimeline,
+  }
+}
+
+const hydrateOpenedProjectSession = async (projectHandleOrPath, rawProjectData, set) => {
+  const { projectData, currentTimelineId, currentTimeline } = normalizeOpenedProjectData(rawProjectData)
+
+  const timelineFps = currentTimeline?.fps || projectData?.settings?.fps || 24
+  useTimelineStore.getState().loadFromProject(currentTimeline, projectData.assets, timelineFps)
+  await useAssetsStore.getState().loadFromProject(
+    projectData.assets,
+    projectHandleOrPath,
+    projectData.folders,
+    projectData.folderCounter
+  )
+
+  if (typeof projectHandleOrPath === 'string') {
+    useAssetsStore.getState().loadSpritesFromProject(projectHandleOrPath).catch((err) => {
+      console.warn('Failed to load sprites:', err)
+    })
+  }
+
+  const recentProject = {
+    name: projectData.name,
+    path: typeof projectHandleOrPath === 'string' ? projectHandleOrPath : null,
+    modified: projectData.modified,
+    created: projectData.created,
+    settings: projectData.settings,
+    thumbnail: projectData.thumbnail,
+  }
+
+  set((state) => ({
+    currentProject: projectData,
+    currentProjectHandle: projectHandleOrPath,
+    currentTimelineId,
+    projectHistory: [],
+    projectFuture: [],
+    projectHistoryLastChangedAt: 0,
+    recentProjects: [recentProject, ...state.recentProjects.filter((p) => p.name !== projectData.name)].slice(0, 10),
+    isLoading: false,
+    error: null,
+    lastFailedProjectHandle: null,
+    lastFailedProjectName: null,
+  }))
+
+  return projectData
+}
+
 /**
  * Project Store
  * Manages project state, recent projects, and file system operations
@@ -145,6 +221,8 @@ export const useProjectStore = create(
       isFirstRun: true, // Whether this is first time opening the app
       isLoading: false,
       error: null,
+      lastFailedProjectHandle: null,
+      lastFailedProjectName: null,
       
       // Auto-save settings
       autoSaveEnabled: true,
@@ -366,7 +444,7 @@ export const useProjectStore = create(
        * @param {FileSystemDirectoryHandle|string} projectHandleOrPath - The project directory handle or path
        */
       openProject: async (projectHandleOrPath) => {
-        set({ isLoading: true, error: null })
+        set({ isLoading: true, error: null, lastFailedProjectHandle: null, lastFailedProjectName: null })
         
         try {
           // Verify permission/existence
@@ -383,73 +461,16 @@ export const useProjectStore = create(
           
           // Store handle/path for persistence
           await storeDirectoryHandle('currentProject', projectHandleOrPath)
-          
-          // Handle legacy projects (single timeline) - migrate to multi-timeline format
-          if (projectData.timeline && !projectData.timelines) {
-            const migratedTimeline = {
-              ...projectData.timeline,
-              id: 'timeline-1',
-              name: 'Timeline 1',
-              created: projectData.created,
-              modified: projectData.modified,
-            }
-            projectData.timelines = [migratedTimeline]
-            projectData.currentTimelineId = migratedTimeline.id
-            delete projectData.timeline
-          }
-          
-          // Ensure we have timelines array
-          if (!projectData.timelines || projectData.timelines.length === 0) {
-            projectData.timelines = [createDefaultTimeline('Timeline 1')]
-            projectData.currentTimelineId = projectData.timelines[0].id
-          }
-          
-          // Get the current timeline to load
-          const currentTimelineId = projectData.currentTimelineId || projectData.timelines[0].id
-          const currentTimeline = projectData.timelines.find(t => t.id === currentTimelineId) || projectData.timelines[0]
-          
-          // Load timeline and assets data into their respective stores; restore folder structure
-          const timelineFps = currentTimeline?.fps || projectData?.settings?.fps || 24
-          useTimelineStore.getState().loadFromProject(currentTimeline, projectData.assets, timelineFps)
-          await useAssetsStore.getState().loadFromProject(
-            projectData.assets,
-            projectHandleOrPath,
-            projectData.folders,
-            projectData.folderCounter
-          )
-          
-          // Load thumbnail sprites in background (Electron only)
-          if (typeof projectHandleOrPath === 'string') {
-            useAssetsStore.getState().loadSpritesFromProject(projectHandleOrPath).catch(err => {
-              console.warn('Failed to load sprites:', err)
-            })
-          }
-          
-          // Update recent projects
-          const recentProject = {
-            name: projectData.name,
-            path: typeof projectHandleOrPath === 'string' ? projectHandleOrPath : null,
-            modified: projectData.modified,
-            created: projectData.created,
-            settings: projectData.settings,
-            thumbnail: projectData.thumbnail,
-          }
-          
-          set((state) => ({
-            currentProject: projectData,
-            currentProjectHandle: projectHandleOrPath,
-            currentTimelineId: currentTimeline.id,
-            projectHistory: [],
-            projectFuture: [],
-            projectHistoryLastChangedAt: 0,
-            recentProjects: [recentProject, ...state.recentProjects.filter(p => p.name !== projectData.name)].slice(0, 10),
-            isLoading: false,
-          }))
-          
-          return projectData
+
+          return await hydrateOpenedProjectSession(projectHandleOrPath, projectData, set)
         } catch (err) {
           console.error('Error opening project:', err)
-          set({ isLoading: false, error: err.message })
+          set({
+            isLoading: false,
+            error: err.message,
+            lastFailedProjectHandle: projectHandleOrPath,
+            lastFailedProjectName: getDisplayName(projectHandleOrPath),
+          })
           return null
         }
       },
@@ -467,6 +488,40 @@ export const useProjectStore = create(
         } catch (err) {
           console.error('Error opening project from picker:', err)
           set({ error: err.message })
+          return null
+        }
+      },
+
+      /**
+       * Open the latest autosave snapshot for the last project that failed to open.
+       */
+      openLatestAutosaveForFailedProject: async () => {
+        const state = get()
+        const failedProjectHandle = state.lastFailedProjectHandle
+
+        if (!failedProjectHandle) {
+          set({ error: 'No failed project is available for autosave recovery.' })
+          return null
+        }
+
+        set({ isLoading: true, error: null })
+
+        try {
+          const isValid = await verifyPermission(failedProjectHandle)
+          if (!isValid) {
+            throw new Error('Permission denied or project folder not accessible')
+          }
+
+          const { projectData } = await loadLatestProjectAutosaveFromFile(failedProjectHandle)
+          await storeDirectoryHandle('currentProject', failedProjectHandle)
+
+          return await hydrateOpenedProjectSession(failedProjectHandle, projectData, set)
+        } catch (err) {
+          console.error('Error opening latest autosave:', err)
+          set({
+            isLoading: false,
+            error: err.message,
+          })
           return null
         }
       },

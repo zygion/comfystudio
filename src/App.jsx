@@ -3,7 +3,9 @@ import TitleBar from './components/TitleBar'
 import ExportPanel from './components/ExportPanel'
 import GenerateWorkspace from './components/GenerateWorkspace'
 import LLMAssistantWorkspace from './components/LLMAssistantWorkspace'
+import MOGWorkspace from './components/MOGWorkspace'
 import StockPanel from './components/StockPanel'
+import WorkspaceErrorBoundary from './components/WorkspaceErrorBoundary'
 import LeftPanel from './components/LeftPanel'
 import PreviewPanel from './components/PreviewPanel'
 import Timeline from './components/Timeline'
@@ -148,7 +150,7 @@ function App() {
     } catch (_) { /* ignore */ }
   }, [])
 
-  const isFullScreenTab = mainTab === 'export' || mainTab === 'generate' || mainTab === 'llm-assistant' || mainTab === 'stock' || (showComfyUiTab && mainTab === 'comfyui')
+  const isFullScreenTab = mainTab === 'export' || mainTab === 'generate' || mainTab === 'mog' || mainTab === 'llm-assistant' || mainTab === 'stock' || (showComfyUiTab && mainTab === 'comfyui')
   // Editor layout insets (used for content when on Editor, and always for tab bar so it doesn't shift)
   const editorLeftInset = leftPanelExpanded ? ICON_BAR_WIDTH + leftPanelWidth : ICON_BAR_WIDTH
   const editorRightInset = inspectorExpanded ? ICON_BAR_WIDTH + inspectorWidth : ICON_BAR_WIDTH
@@ -305,13 +307,20 @@ function App() {
         >
           <GenerateWorkspace />
         </div>
+        {mainTab === 'mog' && (
+          <div className="flex-1 flex flex-col min-h-0 overflow-hidden bg-sf-dark-950">
+            <WorkspaceErrorBoundary>
+              <MOGWorkspace />
+            </WorkspaceErrorBoundary>
+          </div>
+        )}
         {mainTab === 'export' ? (
           <ExportPanel />
         ) : mainTab === 'stock' ? (
           <StockPanel />
         ) : mainTab === 'llm-assistant' ? (
           <LLMAssistantWorkspace />
-        ) : mainTab === 'comfyui' || mainTab === 'generate' ? null : (
+        ) : mainTab === 'comfyui' || mainTab === 'generate' || mainTab === 'mog' ? null : (
           <>
             {/* Left Panel - Full Height Mode (spans entire left side) */}
             {leftPanelFullHeight && (

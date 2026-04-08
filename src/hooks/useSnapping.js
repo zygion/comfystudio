@@ -77,30 +77,41 @@ export function useSnapping() {
     ]
   }, [playheadPosition, clipEdgeSnapPoints, gridSnapPoints])
 
+  const getExcludedClipIdSet = useCallback((excludeClipIds = null) => {
+    if (!excludeClipIds) return null
+    if (excludeClipIds instanceof Set) return excludeClipIds.size > 0 ? excludeClipIds : null
+    const normalizedIds = Array.isArray(excludeClipIds)
+      ? excludeClipIds.filter(Boolean)
+      : [excludeClipIds].filter(Boolean)
+    return normalizedIds.length > 0 ? new Set(normalizedIds) : null
+  }, [])
+
   /**
    * Get all snap points on the timeline
    * Returns array of { time, type, clipId? }
    */
-  const getSnapPoints = useCallback((excludeClipId = null) => {
-    if (!excludeClipId) return allSnapPoints
-    return allSnapPoints.filter((point) => point.clipId !== excludeClipId)
-  }, [allSnapPoints])
+  const getSnapPoints = useCallback((excludeClipIds = null) => {
+    const excludedClipIds = getExcludedClipIdSet(excludeClipIds)
+    if (!excludedClipIds) return allSnapPoints
+    return allSnapPoints.filter((point) => !point.clipId || !excludedClipIds.has(point.clipId))
+  }, [allSnapPoints, getExcludedClipIdSet])
 
   /**
    * Find the nearest snap point to a given time
    * Returns { snapped: boolean, time: number, snapPoint?: object, distance?: number }
    */
-  const findNearestSnap = useCallback((time, excludeClipId = null, customThreshold = null) => {
+  const findNearestSnap = useCallback((time, excludeClipIds = null, customThreshold = null) => {
     if (!snappingEnabled) {
       return { snapped: false, time }
     }
     
     const threshold = customThreshold ?? thresholdInSeconds
+    const excludedClipIdSet = getExcludedClipIdSet(excludeClipIds)
     let nearestSnap = null
     let minDistance = Infinity
     
     for (const snapPoint of allSnapPoints) {
-      if (excludeClipId && snapPoint.clipId === excludeClipId) continue
+      if (excludedClipIdSet && snapPoint.clipId && excludedClipIdSet.has(snapPoint.clipId)) continue
       const distance = Math.abs(snapPoint.time - time)
       
       if (distance < threshold && distance < minDistance) {
@@ -127,13 +138,13 @@ export function useSnapping() {
     }
     
     return { snapped: false, time }
-  }, [snappingEnabled, thresholdInSeconds, allSnapPoints])
+  }, [snappingEnabled, thresholdInSeconds, allSnapPoints, getExcludedClipIdSet])
 
   /**
    * Snap a clip's position (checks both start and end edges)
    * Returns { snapped: boolean, startTime: number, snapInfo?: { edge, snapPoint } }
    */
-  const snapClipPosition = useCallback((clipId, proposedStartTime, clipDuration) => {
+  const snapClipPosition = useCallback((excludeClipIds, proposedStartTime, clipDuration) => {
     if (!snappingEnabled) {
       return { snapped: false, startTime: proposedStartTime }
     }
@@ -141,10 +152,10 @@ export function useSnapping() {
     const proposedEndTime = proposedStartTime + clipDuration
     
     // Check start edge
-    const startSnap = findNearestSnap(proposedStartTime, clipId)
+    const startSnap = findNearestSnap(proposedStartTime, excludeClipIds)
     
     // Check end edge
-    const endSnap = findNearestSnap(proposedEndTime, clipId)
+    const endSnap = findNearestSnap(proposedEndTime, excludeClipIds)
     
     // Prefer the closer snap, or start edge if equal
     if (startSnap.snapped && endSnap.snapped) {

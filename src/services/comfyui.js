@@ -979,18 +979,26 @@ export function modifyZImageTurboWorkflow(workflow, options = {}) {
   const {
     prompt = '',
     seed = Math.floor(Math.random() * 1000000000000),
+    width = 1024,
+    height = 1024,
     filenamePrefix = '',
   } = options
 
   const modified = JSON.parse(JSON.stringify(workflow))
+  const numericWidth = Math.max(256, Math.round(Number(width) || 1024))
+  const numericHeight = Math.max(256, Math.round(Number(height) || 1024))
 
-  for (const [nodeId, node] of Object.entries(modified)) {
+  for (const node of Object.values(modified)) {
     if (!node?.inputs) continue
     if (node.class_type === 'CLIPTextEncode' && (node._meta?.title || '').includes('Prompt')) {
       node.inputs.text = prompt
     }
     if (node.class_type === 'KSampler' && 'seed' in node.inputs) {
       node.inputs.seed = seed
+    }
+    if ((node.class_type === 'EmptySD3LatentImage' || node.class_type === 'EmptyLatentImage')) {
+      if ('width' in node.inputs) node.inputs.width = numericWidth
+      if ('height' in node.inputs) node.inputs.height = numericHeight
     }
     if (node.class_type === 'SaveImage' && 'filename_prefix' in node.inputs) {
       node.inputs.filename_prefix = filenamePrefix || node.inputs.filename_prefix || 'image/z_image_turbo'
@@ -1059,6 +1067,7 @@ export function modifySeedream5LiteImageEditWorkflow(workflow, options = {}) {
   const modified = JSON.parse(JSON.stringify(workflow))
   const numericWidth = Math.max(256, Math.round(Number(width) || 0))
   const numericHeight = Math.max(256, Math.round(Number(height) || 0))
+  const sizePreset = resolveSeedreamSizePreset(numericWidth, numericHeight)
   const validReferences = (Array.isArray(referenceImages) ? referenceImages : [])
     .map((name) => String(name || '').trim())
     .filter(Boolean)
@@ -1091,6 +1100,7 @@ export function modifySeedream5LiteImageEditWorkflow(workflow, options = {}) {
       if ('model' in node.inputs) node.inputs.model = model
       if ('prompt' in node.inputs) node.inputs.prompt = prompt
       if ('seed' in node.inputs) node.inputs.seed = seed
+      if ('size_preset' in node.inputs && sizePreset) node.inputs.size_preset = sizePreset
       if ('width' in node.inputs && Number.isFinite(numericWidth)) node.inputs.width = numericWidth
       if ('height' in node.inputs && Number.isFinite(numericHeight)) node.inputs.height = numericHeight
       if ('max_images' in node.inputs) node.inputs.max_images = 1
@@ -1149,6 +1159,8 @@ export function modifyNanoBanana2Workflow(workflow, options = {}) {
     prompt = '',
     seed = Math.floor(Math.random() * 1000000000000),
     model = 'Nano Banana 2 (Gemini 3.1 Flash Image)',
+    width = null,
+    height = null,
     aspectRatio = 'auto',
     resolution = '2K',
     filenamePrefix = 'image/nano_banana_2',
@@ -1162,6 +1174,17 @@ export function modifyNanoBanana2Workflow(workflow, options = {}) {
     .map((name) => String(name || '').trim())
     .filter(Boolean)
     .slice(0, 2)
+  const numericWidth = Number(width)
+  const numericHeight = Number(height)
+  const hasExplicitDimensions = Number.isFinite(numericWidth) && numericWidth > 0 && Number.isFinite(numericHeight) && numericHeight > 0
+  const safeAspectRatio = String(aspectRatio || '').trim() && aspectRatio !== 'auto'
+    ? aspectRatio
+    : resolveClosestAspectRatio(numericWidth, numericHeight)
+  const safeResolution = String(resolution || '').trim() || (
+    hasExplicitDimensions
+      ? resolveTieredImageResolution(numericWidth, numericHeight, '1K')
+      : '2K'
+  )
 
   let geminiNode = null
 
@@ -1187,8 +1210,8 @@ export function modifyNanoBanana2Workflow(workflow, options = {}) {
       if ('prompt' in node.inputs) node.inputs.prompt = prompt
       if ('model' in node.inputs) node.inputs.model = model
       if ('seed' in node.inputs) node.inputs.seed = seed
-      if ('aspect_ratio' in node.inputs) node.inputs.aspect_ratio = aspectRatio
-      if ('resolution' in node.inputs) node.inputs.resolution = resolution
+      if ('aspect_ratio' in node.inputs) node.inputs.aspect_ratio = safeAspectRatio
+      if ('resolution' in node.inputs) node.inputs.resolution = safeResolution
       if ('response_modalities' in node.inputs) node.inputs.response_modalities = 'IMAGE'
       if ('thinking_level' in node.inputs) node.inputs.thinking_level = thinkingLevel
       if (systemPrompt && 'system_prompt' in node.inputs) {
@@ -1240,6 +1263,28 @@ export function modifyNanoBanana2Workflow(workflow, options = {}) {
 
 // Backward-compatible alias for legacy callers.
 export const modifyNanoBananaProWorkflow = modifyNanoBanana2Workflow
+
+function resolveTieredImageResolution(width, height, fallback = '1K') {
+  const w = Number(width)
+  const h = Number(height)
+  if (!Number.isFinite(w) || !Number.isFinite(h)) return fallback
+  const longestEdge = Math.max(w, h)
+  return longestEdge >= 1800 ? '2K' : '1K'
+}
+
+function resolveSeedreamSizePreset(width, height) {
+  const w = Math.max(256, Math.round(Number(width) || 0))
+  const h = Math.max(256, Math.round(Number(height) || 0))
+  const sizePresetMap = {
+    '1280x720': '1280x720 (16:9)',
+    '1920x1080': '1920x1080 (16:9)',
+    '720x1280': '720x1280 (9:16)',
+    '1080x1920': '1080x1920 (9:16)',
+    '1024x1024': '1024x1024 (1:1)',
+    '2048x2048': '2048x2048 (1:1)',
+  }
+  return sizePresetMap[`${w}x${h}`] || null
+}
 
 function resolveClosestAspectRatio(width, height) {
   const w = Number(width)

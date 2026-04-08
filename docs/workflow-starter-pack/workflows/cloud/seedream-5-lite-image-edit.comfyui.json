@@ -2,7 +2,7 @@
   "25": {
     "inputs": {
       "model": "seedream 5.0 lite",
-      "prompt": "A futuristic transit terminal glows with blue and coral neon as the model steps through sliding glass doors.",
+      "prompt": "Describe the requested image edit while preserving the supplied reference imagery.",
       "size_preset": "2560x1440 (16:9)",
       "width": 2048,
       "height": 2048,
@@ -36,7 +36,7 @@
   },
   "29": {
     "inputs": {
-      "image": "teenager.jpg"
+      "image": "model_placeholder.jpg"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -61,7 +61,7 @@
   },
   "32": {
     "inputs": {
-      "image": "WMNS+AIR+JORDAN+1+LOW.jpg"
+      "image": "product_placeholder.jpg"
     },
     "class_type": "LoadImage",
     "_meta": {

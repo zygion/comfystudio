@@ -4,6 +4,7 @@ import { Copy, Minus, Square, X } from 'lucide-react'
 const TOP_TABS = [
   { id: 'editor', label: 'Editor' },
   { id: 'generate', label: 'Generate' },
+  { id: 'mog', label: 'MoGraph' },
   { id: 'stock', label: 'Stock' },
   { id: 'comfyui', label: 'ComfyUI' },
   { id: 'llm-assistant', label: 'LLM' },
@@ -93,16 +94,23 @@ function TitleBar({
               {index > 0 && (
                 <div className="w-px h-4 bg-sf-dark-600 flex-shrink-0" aria-hidden="true" />
               )}
-              <button
-                onClick={() => onTabChange?.(tab.id)}
-                className={`px-3 py-1 text-[11px] rounded-none transition-colors ${
-                  activeTab === tab.id
-                    ? 'bg-sf-accent text-white'
-                    : 'text-sf-text-muted hover:text-sf-text-primary hover:bg-sf-dark-700'
-                }`}
-              >
-                {tab.label}
-              </button>
+              <div className="relative flex h-full items-center">
+                <button
+                  onClick={() => onTabChange?.(tab.id)}
+                  className={`px-3 py-1 text-[11px] rounded-none transition-colors ${
+                    activeTab === tab.id
+                      ? 'bg-sf-accent text-white'
+                      : 'text-sf-text-muted hover:text-sf-text-primary hover:bg-sf-dark-700'
+                  }`}
+                >
+                  {tab.label}
+                </button>
+                {tab.id === 'mog' && activeTab === 'mog' && (
+                  <div className="pointer-events-none absolute left-1/2 top-full mt-1 -translate-x-1/2 rounded-full bg-pink-300/12 px-2 py-0.5 text-[9px] font-medium uppercase tracking-[0.18em] text-pink-200/65 shadow-[0_0_10px_rgba(244,114,182,0.12)]">
+                    beta
+                  </div>
+                )}
+              </div>
             </Fragment>
           ))}
         </div>

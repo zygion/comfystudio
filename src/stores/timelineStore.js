@@ -1608,25 +1608,32 @@ export const useTimelineStore = create(
   /**
    * Set start times of selected clips to given values (used for multi-clip drag so motion stays 1:1 with mouse).
    * @param {Array<{ id: string, startTime: number }>} updates - Per-clip start times for selected clips
+   * @param {Array<string>|null} clipIdsOverride - Optional explicit clip ids to update instead of current selection
    */
-  setSelectedClipsStartTimes: (updates) => {
-    get().setSelectedClipPositions(updates)
+  setSelectedClipsStartTimes: (updates, clipIdsOverride = null) => {
+    get().setSelectedClipPositions(updates, clipIdsOverride)
   },
 
   /**
    * Set positions of selected clips to given values (used for multi-clip drag so motion stays 1:1 with mouse).
    * @param {Array<{ id: string, startTime: number, trackId?: string }>} updates - Per-clip position updates
+   * @param {Array<string>|null} clipIdsOverride - Optional explicit clip ids to update instead of current selection
    */
-  setSelectedClipPositions: (updates) => {
+  setSelectedClipPositions: (updates, clipIdsOverride = null) => {
     const state = get()
     const fps = state.timelineFps || 24
+    const targetIds = new Set(
+      Array.isArray(clipIdsOverride) && clipIdsOverride.length > 0
+        ? dedupeClipIds(clipIdsOverride)
+        : state.selectedClipIds
+    )
     const map = new Map(updates.map((u) => [u.id, {
       startTime: roundToFrame(Math.max(0, u.startTime), fps),
       trackId: typeof u.trackId === 'string' ? u.trackId : undefined,
     }]))
     set((state) => ({
       clips: state.clips.map((clip) => {
-        if (!state.selectedClipIds.includes(clip.id)) return clip
+        if (!targetIds.has(clip.id)) return clip
         const nextPosition = map.get(clip.id)
         if (!nextPosition) return clip
         return {
@@ -1643,16 +1650,24 @@ export const useTimelineStore = create(
    * @param {number} deltaTime - The time delta to move by
    * @param {string|null} newTrackId - Optional new track ID
    * @param {boolean} resolveOverlaps - Whether to cut overlapping clips (default: false, set true on drag end)
+   * @param {Array<string>|null} clipIdsOverride - Optional explicit clip ids to move instead of current selection
    */
-  moveSelectedClips: (deltaTime, newTrackId = null, resolveOverlaps = false) => {
+  moveSelectedClips: (deltaTime, newTrackId = null, resolveOverlaps = false, clipIdsOverride = null) => {
     // History for interactive drags is captured by the UI gesture start.
     // Keep this mutation history-neutral to avoid no-op undo states.
     
     const fps = get().timelineFps || 24
     set((state) => {
+      const movingClipIds = dedupeClipIds(
+        Array.isArray(clipIdsOverride) && clipIdsOverride.length > 0
+          ? clipIdsOverride
+          : state.selectedClipIds
+      )
+      const movingClipIdSet = new Set(movingClipIds)
+
       // First, move all selected clips (frame-aligned)
       let updatedClips = state.clips.map(clip => {
-        if (state.selectedClipIds.includes(clip.id)) {
+        if (movingClipIdSet.has(clip.id)) {
           const rawStart = Math.max(0, clip.startTime + deltaTime)
           return {
             ...clip,
@@ -1673,11 +1688,19 @@ export const useTimelineStore = create(
       let clipsToRemove = []
       let clipsToAdd = []
       let addedCounter = 0
+      const trackOrder = new Map(state.tracks.map((track, index) => [track.id, index]))
+      const movedClips = updatedClips
+        .filter((clip) => movingClipIdSet.has(clip.id))
+        .sort((a, b) => {
+          const trackIndexA = trackOrder.get(a.trackId) ?? Number.MAX_SAFE_INTEGER
+          const trackIndexB = trackOrder.get(b.trackId) ?? Number.MAX_SAFE_INTEGER
+          if (trackIndexA !== trackIndexB) return trackIndexA - trackIndexB
+          if (a.startTime !== b.startTime) return a.startTime - b.startTime
+          if (a.duration !== b.duration) return b.duration - a.duration
+          return String(a.id).localeCompare(String(b.id))
+        })
       
-      state.selectedClipIds.forEach(movedClipId => {
-        const movedClip = updatedClips.find(c => c.id === movedClipId)
-        if (!movedClip) return
-        
+      movedClips.forEach((movedClip) => {
         const newStartTime = movedClip.startTime
         const newEndTime = newStartTime + movedClip.duration
         const trackId = movedClip.trackId
@@ -1685,7 +1708,7 @@ export const useTimelineStore = create(
         // Find all clips on the same track that overlap (excluding moved/selected clips)
         const overlappingClips = updatedClips.filter(c => 
           c.trackId === trackId &&
-          !state.selectedClipIds.includes(c.id) &&
+          !movingClipIdSet.has(c.id) &&
           !clipsToRemove.includes(c.id) &&
           c.startTime < newEndTime &&
           c.startTime + c.duration > newStartTime

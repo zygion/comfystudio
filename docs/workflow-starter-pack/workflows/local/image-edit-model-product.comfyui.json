@@ -14,7 +14,7 @@
   },
   "78": {
     "inputs": {
-      "image": "teenager.jpg"
+      "image": "model_placeholder.jpg"
     },
     "class_type": "LoadImage",
     "_meta": {
@@ -23,7 +23,7 @@
   },
   "435": {
     "inputs": {
-      "value": "Scene 2: Close-up of the same sneakers being laced tightly by a young teenage boy (male, about 16, short dark curly hair, black hoodie, dark jeans) while seated on a concrete ledge. Keep shoe colors, stripe, and shape identical."
+      "value": "Describe the requested keyframe edit while preserving the provided model and product references."
     },
     "class_type": "PrimitiveStringMultiline",
     "_meta": {
@@ -32,7 +32,7 @@
   },
   "436": {
     "inputs": {
-      "image": "WMNS+AIR+JORDAN+1+LOW.jpg"
+      "image": "product_placeholder.jpg"
     },
     "class_type": "LoadImage",
     "_meta": {

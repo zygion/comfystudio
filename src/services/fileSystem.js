@@ -105,6 +105,94 @@ export const createProjectFolder = async (baseDir, projectName) => {
 
 const PROJECT_FILENAME = 'project.comfystudio'
 const PROJECT_FILENAME_LEGACY = 'project.storyflow'
+const PROJECT_AUTOSAVE_DIRNAME = 'autosave'
+const MAX_PROJECT_AUTOSAVE_SNAPSHOTS = 10
+
+const padNumber = (value, length = 2) => String(value).padStart(length, '0')
+
+const createProjectSnapshotFilename = (timestamp = new Date()) => {
+  const date = timestamp instanceof Date ? timestamp : new Date(timestamp)
+  return [
+    'project-',
+    date.getFullYear(),
+    padNumber(date.getMonth() + 1),
+    padNumber(date.getDate()),
+    '-',
+    padNumber(date.getHours()),
+    padNumber(date.getMinutes()),
+    padNumber(date.getSeconds()),
+    '-',
+    padNumber(date.getMilliseconds(), 3),
+    '.comfystudio',
+  ].join('')
+}
+
+const sortSnapshotsNewestFirst = (entries) => {
+  return [...entries].sort((a, b) => {
+    const timeA = Number(new Date(a.modified || a.created || 0))
+    const timeB = Number(new Date(b.modified || b.created || 0))
+    if (timeB !== timeA) return timeB - timeA
+    return String(b.name || '').localeCompare(String(a.name || ''))
+  })
+}
+
+const writeProjectSnapshotElectron = async (projectDir, projectJson, timestamp) => {
+  const autosaveDir = await window.electronAPI.pathJoin(projectDir, PROJECT_AUTOSAVE_DIRNAME)
+  await window.electronAPI.createDirectory(autosaveDir)
+
+  const snapshotFilename = createProjectSnapshotFilename(timestamp)
+  const snapshotPath = await window.electronAPI.pathJoin(autosaveDir, snapshotFilename)
+  const writeResult = await window.electronAPI.writeFile(snapshotPath, projectJson)
+  if (!writeResult.success) {
+    throw new Error(writeResult.error || 'Could not write project snapshot')
+  }
+
+  const listing = await window.electronAPI.listDirectory(autosaveDir, { includeStats: true })
+  if (!listing.success) {
+    throw new Error(listing.error || 'Could not list project snapshots')
+  }
+
+  const snapshots = sortSnapshotsNewestFirst(
+    listing.items.filter((item) => item.isFile && item.name.endsWith('.comfystudio'))
+  )
+
+  await Promise.all(
+    snapshots
+      .slice(MAX_PROJECT_AUTOSAVE_SNAPSHOTS)
+      .map((item) => window.electronAPI.deleteFile(item.path))
+  )
+}
+
+const writeProjectSnapshotWeb = async (projectDir, projectJson, timestamp) => {
+  const autosaveDir = await projectDir.getDirectoryHandle(PROJECT_AUTOSAVE_DIRNAME, { create: true })
+  const snapshotFilename = createProjectSnapshotFilename(timestamp)
+  const snapshotHandle = await autosaveDir.getFileHandle(snapshotFilename, { create: true })
+  const writable = await snapshotHandle.createWritable()
+  await writable.write(projectJson)
+  await writable.close()
+
+  const snapshots = []
+  for await (const [name, handle] of autosaveDir.entries()) {
+    if (handle.kind !== 'file' || !name.endsWith('.comfystudio')) continue
+    const file = await handle.getFile()
+    snapshots.push({
+      name,
+      modified: new Date(file.lastModified).toISOString(),
+    })
+  }
+
+  const staleSnapshots = sortSnapshotsNewestFirst(snapshots).slice(MAX_PROJECT_AUTOSAVE_SNAPSHOTS)
+  for (const snapshot of staleSnapshots) {
+    await autosaveDir.removeEntry(snapshot.name)
+  }
+}
+
+const writeProjectSnapshot = async (projectDir, projectJson, timestamp) => {
+  if (isElectron()) {
+    return writeProjectSnapshotElectron(projectDir, projectJson, timestamp)
+  }
+  return writeProjectSnapshotWeb(projectDir, projectJson, timestamp)
+}
 
 /**
  * Save project data to .comfystudio file
@@ -112,17 +200,24 @@ const PROJECT_FILENAME_LEGACY = 'project.storyflow'
  * @param {object} projectData - The project data to save
  */
 export const saveProject = async (projectDir, projectData) => {
+  const saveTimestamp = new Date()
   const dataWithMeta = {
     ...projectData,
     version: '1.0',
-    modified: new Date().toISOString(),
+    modified: saveTimestamp.toISOString(),
   }
+  const serializedProject = JSON.stringify(dataWithMeta, null, 2)
   
   if (isElectron()) {
     const filePath = await window.electronAPI.pathJoin(projectDir, PROJECT_FILENAME)
-    const result = await window.electronAPI.writeFile(filePath, JSON.stringify(dataWithMeta, null, 2))
+    const result = await window.electronAPI.writeFile(filePath, serializedProject)
     if (!result.success) {
       throw new Error(result.error)
+    }
+    try {
+      await writeProjectSnapshot(projectDir, serializedProject, saveTimestamp)
+    } catch (snapshotError) {
+      console.warn('Project snapshot save failed:', snapshotError)
     }
     return
   }
@@ -130,8 +225,13 @@ export const saveProject = async (projectDir, projectData) => {
   // Web fallback
   const fileHandle = await projectDir.getFileHandle(PROJECT_FILENAME, { create: true })
   const writable = await fileHandle.createWritable()
-  await writable.write(JSON.stringify(dataWithMeta, null, 2))
+  await writable.write(serializedProject)
   await writable.close()
+  try {
+    await writeProjectSnapshot(projectDir, serializedProject, saveTimestamp)
+  } catch (snapshotError) {
+    console.warn('Project snapshot save failed:', snapshotError)
+  }
 }
 
 /**
@@ -211,6 +311,78 @@ export const loadProject = async (projectDir) => {
     throw new Error(`Project file is empty or invalid (corrupted JSON). The ${sourceLabel} file may be damaged.`)
   }
   return projectData
+}
+
+/**
+ * Load the latest autosave snapshot for a project without overwriting the main project file.
+ * @param {string|FileSystemDirectoryHandle} projectDir
+ * @returns {Promise<{ projectData: object, snapshotName: string }>}
+ */
+export const loadLatestProjectAutosave = async (projectDir) => {
+  if (isElectron()) {
+    const autosavePath = await window.electronAPI.pathJoin(projectDir, PROJECT_AUTOSAVE_DIRNAME)
+    const autosaveExists = await window.electronAPI.exists(autosavePath)
+    if (!autosaveExists) {
+      throw new Error('No autosave folder was found for this project.')
+    }
+
+    const listing = await window.electronAPI.listDirectory(autosavePath, { includeStats: true })
+    if (!listing.success) {
+      throw new Error(listing.error || 'Could not read project autosaves.')
+    }
+
+    const latestSnapshot = sortSnapshotsNewestFirst(
+      listing.items.filter((item) => item.isFile && item.name.endsWith('.comfystudio'))
+    )[0]
+
+    if (!latestSnapshot) {
+      throw new Error('No autosave snapshots are available for this project yet.')
+    }
+
+    const readResult = await window.electronAPI.readFile(latestSnapshot.path, { encoding: 'utf8' })
+    if (!readResult.success) {
+      throw new Error(readResult.error || 'Could not read the latest autosave snapshot.')
+    }
+
+    const projectData = parseProjectJson(readResult.data, latestSnapshot.path)
+    if (!projectData) {
+      throw new Error(`The latest autosave snapshot (${latestSnapshot.name}) is invalid.`)
+    }
+
+    return { projectData, snapshotName: latestSnapshot.name }
+  }
+
+  try {
+    const autosaveDir = await projectDir.getDirectoryHandle(PROJECT_AUTOSAVE_DIRNAME)
+    const snapshots = []
+
+    for await (const [name, handle] of autosaveDir.entries()) {
+      if (handle.kind !== 'file' || !name.endsWith('.comfystudio')) continue
+      const file = await handle.getFile()
+      snapshots.push({
+        name,
+        modified: new Date(file.lastModified).toISOString(),
+        file,
+      })
+    }
+
+    const latestSnapshot = sortSnapshotsNewestFirst(snapshots)[0]
+    if (!latestSnapshot) {
+      throw new Error('No autosave snapshots are available for this project yet.')
+    }
+
+    const projectData = parseProjectJson(await latestSnapshot.file.text(), latestSnapshot.name)
+    if (!projectData) {
+      throw new Error(`The latest autosave snapshot (${latestSnapshot.name}) is invalid.`)
+    }
+
+    return { projectData, snapshotName: latestSnapshot.name }
+  } catch (error) {
+    if (error?.name === 'NotFoundError') {
+      throw new Error('No autosave folder was found for this project.')
+    }
+    throw error
+  }
 }
 
 /**

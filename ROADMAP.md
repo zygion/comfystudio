@@ -61,12 +61,12 @@ This phase focuses on features that help experienced editors work faster and wit
 Recent Phase 2 progress that is now shipped:
 
 - Better editing toolbar coverage for split, copy, paste, enable or disable, delete, and text clip creation directly in the timeline header
+- Better multi-clip movement across tracks so linked or selected groups keep their layout and drop more predictably
 
 Remaining Phase 2 priorities:
 
 - Move selected clips by exact timecode offset
 - Extend clip duration by a chosen amount
-- Better multi-clip movement across tracks
 - Show timelines and sequences in a dedicated browser section and open them directly from the Assets panel
 - Fully customizable keyboard shortcuts and hotkeys in settings
 - Editor keymap profiles with familiar presets such as Premiere Pro, Resolve, and Final Cut Pro

@@ -18,14 +18,20 @@ function WelcomeScreen() {
     checkBrowserSupport,
     selectDefaultProjectsLocation,
     openProjectFromPicker,
+    openLatestAutosaveForFailedProject,
     openRecentProject,
     removeRecentProject,
     clearError,
     getRecentProjectsList,
     isElectronMode,
+    lastFailedProjectHandle,
+    lastFailedProjectName,
   } = useProjectStore()
   
   const isBrowserSupported = checkBrowserSupport()
+  const canOpenLatestAutosave = Boolean(
+    lastFailedProjectHandle && error?.includes('Project file is empty or invalid')
+  )
   
   // Load recent projects on mount
   useEffect(() => {
@@ -111,6 +117,14 @@ function WelcomeScreen() {
             {error && (
               <div className="mb-4 p-3 bg-sf-error/20 border border-sf-error/50 rounded-lg">
                 <p className="text-xs text-sf-error">{error}</p>
+                {canOpenLatestAutosave && (
+                  <button
+                    onClick={openLatestAutosaveForFailedProject}
+                    className="text-xs text-sf-text-primary hover:text-white mt-2 rounded-md border border-sf-dark-500 bg-sf-dark-900 px-2.5 py-1 transition-colors"
+                  >
+                    Open latest autosave{lastFailedProjectName ? ` for ${lastFailedProjectName}` : ''}
+                  </button>
+                )}
                 <button 
                   onClick={clearError}
                   className="text-xs text-sf-text-muted hover:text-sf-text-primary mt-1"
@@ -176,6 +190,15 @@ function WelcomeScreen() {
             <AlertCircle className="w-5 h-5 text-sf-error flex-shrink-0" />
             <div className="flex-1">
               <p className="text-sm text-sf-text-primary">{error}</p>
+              {canOpenLatestAutosave && (
+                <button
+                  onClick={openLatestAutosaveForFailedProject}
+                  className="mt-3 inline-flex items-center gap-2 rounded-lg border border-sf-dark-500 bg-sf-dark-900 px-3 py-2 text-xs text-sf-text-primary hover:border-sf-dark-400 hover:text-white transition-colors"
+                >
+                  <FolderOpen className="w-3.5 h-3.5" />
+                  Open latest autosave{lastFailedProjectName ? ` for ${lastFailedProjectName}` : ''}
+                </button>
+              )}
             </div>
             <button 
               onClick={clearError}
