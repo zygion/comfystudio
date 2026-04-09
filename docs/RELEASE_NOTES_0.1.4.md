@@ -1,12 +1,5 @@
 # ComfyStudio v0.1.4 Draft Release Notes
 
-Use this as the working draft for the next GitHub Release.
-
-## Choose The Right Download
-
-- **Desktop app:** for most users who want to install ComfyStudio and use the editor, Generate workflows, and MoGraph workspace directly.
-- **Workflow Starter Pack (optional):** for advanced ComfyUI users who want to inspect setup workflows manually in ComfyUI and prepare nodes/models outside the app.
-
 ## Highlights
 
 - Major timeline and editing polish since `v0.1.3`
