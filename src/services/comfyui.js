@@ -788,6 +788,76 @@ export function modifyWAN22Workflow(workflow, options = {}) {
 }
 
 /**
+ * Workflow modifier for LTX 2.3 Image-to-Video
+ */
+export function modifyLTX23I2VWorkflow(workflow, options = {}) {
+  const {
+    prompt = '',
+    negativePrompt = '',
+    inputImage = '',
+    width = 1280,
+    height = 720,
+    frames = 121,
+    fps = 24,
+    seed = Math.floor(Math.random() * 1000000000000),
+    filenamePrefix = 'video/ltx23_i2v',
+  } = options
+
+  const modified = JSON.parse(JSON.stringify(workflow))
+  const numericWidth = Math.max(256, Math.round(Number(width) || 1280))
+  const numericHeight = Math.max(256, Math.round(Number(height) || 720))
+  const numericFrames = Math.max(2, Math.round(Number(frames) || 121))
+  const numericFps = Math.max(1, Math.round(Number(fps) || 24))
+  const numericSeed = Math.round(Number(seed) || Math.floor(Math.random() * 1000000000000))
+
+  if (modified['269'] && inputImage) {
+    modified['269'].inputs.image = inputImage
+  }
+
+  if (modified['267:266']) {
+    modified['267:266'].inputs.value = prompt
+  }
+
+  if (modified['267:247']) {
+    modified['267:247'].inputs.text = negativePrompt
+  }
+
+  if (modified['267:257']) {
+    modified['267:257'].inputs.value = numericWidth
+  }
+
+  if (modified['267:258']) {
+    modified['267:258'].inputs.value = numericHeight
+  }
+
+  if (modified['267:225']) {
+    modified['267:225'].inputs.value = numericFrames
+  }
+
+  if (modified['267:260']) {
+    modified['267:260'].inputs.value = numericFps
+  }
+
+  if (modified['267:201']) {
+    modified['267:201'].inputs.value = false
+  }
+
+  if (modified['267:216']) {
+    modified['267:216'].inputs.noise_seed = numericSeed
+  }
+
+  if (modified['267:237']) {
+    modified['267:237'].inputs.noise_seed = numericSeed
+  }
+
+  if (modified['75']) {
+    modified['75'].inputs.filename_prefix = filenamePrefix
+  }
+
+  return modified
+}
+
+/**
  * Workflow modifier for 1-Click Multiple Angles (Qwen Image Edit)
  * Generates 8 camera angles from a single image
  */

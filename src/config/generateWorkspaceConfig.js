@@ -16,6 +16,7 @@ export const CATEGORY_ORDER = ['Shot', 'Movement', 'Angle', 'Lighting', 'Mood', 
 export const WORKFLOWS = {
   video: [
     { id: 'wan22-i2v', label: 'Image to Video (WAN 2.2)', needsImage: true, description: 'Animate an image into video' },
+    { id: 'ltx23-i2v', label: 'Image to Video (LTX 2.3)', needsImage: true, description: 'Animate an image with local LTX 2.3' },
     { id: 'kling-o3-i2v', label: 'Image to Video (Kling O3 Omni)', needsImage: true, description: 'Premium image-to-video with Kling 3.0 Omni' },
     { id: 'grok-video-i2v', label: 'Image to Video (Grok Imagine Video)', needsImage: true, description: 'Cloud image-to-video with Grok Imagine Video Beta' },
     { id: 'vidu-q2-i2v', label: 'Image to Video (Vidu Q2)', needsImage: true, description: 'Cloud image-to-video with Vidu Q2 Pro Fast' },
@@ -123,6 +124,7 @@ export const YOLO_VIDEO_WORKFLOW_TARGET_OPTIONS = Object.freeze([
 
 const WORKFLOW_DISPLAY_LABELS = Object.freeze({
   'wan22-i2v': 'WAN 2.2',
+  'ltx23-i2v': 'LTX 2.3',
   'kling-o3-i2v': 'Kling O3 Omni',
   'grok-video-i2v': 'Grok Imagine Video',
   'vidu-q2-i2v': 'Vidu Q2',
@@ -202,6 +204,12 @@ const WORKFLOW_HARDWARE = Object.freeze({
     runtime: 'local',
     minimumVramGb: 20,
     recommendedVramGb: 24,
+  },
+  'ltx23-i2v': {
+    tierId: 'pro',
+    runtime: 'local',
+    minimumVramGb: 24,
+    recommendedVramGb: 32,
   },
   'nano-banana-2': {
     tierId: 'cloud',

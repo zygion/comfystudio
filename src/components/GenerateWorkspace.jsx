@@ -65,6 +65,31 @@ const DIRECTOR_SUBTABS = [
   },
 ]
 
+const SINGLE_VIDEO_WORKFLOW_IDS = new Set([
+  'wan22-i2v',
+  'ltx23-i2v',
+  'kling-o3-i2v',
+  'grok-video-i2v',
+  'vidu-q2-i2v',
+])
+
+const WORKFLOW_RUNTIME_GROUPS = Object.freeze({
+  local: Object.freeze({
+    id: 'local',
+    label: 'Local',
+    helper: 'Runs on your GPU through local ComfyUI.',
+  }),
+  cloud: Object.freeze({
+    id: 'cloud',
+    label: 'Cloud',
+    helper: 'Uses ComfyUI partner-node credits.',
+  }),
+})
+
+function isSingleVideoWorkflowId(workflowId = '') {
+  return SINGLE_VIDEO_WORKFLOW_IDS.has(String(workflowId || '').trim())
+}
+
 const YOLO_AD_STAGE_TIER_OPTIONS = Object.freeze({
   local: Object.freeze([
     { id: 'low', label: 'Low VRAM' },
@@ -1115,19 +1140,46 @@ function GenerateWorkspace() {
     if (slot === 2) setReferenceAssetId2(newAsset.id)
   }, [addAsset])
 
+  const currentCategoryWorkflows = useMemo(
+    () => WORKFLOWS[category] || [],
+    [category]
+  )
+
   // Current workflow info
-  const currentWorkflow = useMemo(() => {
-    const list = WORKFLOWS[category] || []
-    return list.find(w => w.id === workflowId) || list[0]
-  }, [category, workflowId])
+  const currentWorkflow = useMemo(
+    () => currentCategoryWorkflows.find((workflow) => workflow.id === workflowId) || currentCategoryWorkflows[0],
+    [currentCategoryWorkflows, workflowId]
+  )
+
+  const currentCategoryWorkflowGroups = useMemo(() => {
+    const groups = {
+      local: [],
+      cloud: [],
+    }
+
+    currentCategoryWorkflows.forEach((workflow) => {
+      const runtime = getWorkflowHardwareInfo(workflow.id)?.runtime === 'cloud' ? 'cloud' : 'local'
+      groups[runtime].push(workflow)
+    })
+
+    return ['local', 'cloud']
+      .map((groupId) => {
+        const workflows = groups[groupId]
+        if (workflows.length === 0) return null
+        return {
+          ...WORKFLOW_RUNTIME_GROUPS[groupId],
+          workflows,
+        }
+      })
+      .filter(Boolean)
+  }, [currentCategoryWorkflows])
 
   // When category changes, pick default workflow
   useEffect(() => {
-    const list = WORKFLOWS[category] || []
-    if (list.length > 0 && !list.find(w => w.id === workflowId)) {
-      setWorkflowId(list[0].id)
+    if (currentCategoryWorkflows.length > 0 && !currentCategoryWorkflows.find((workflow) => workflow.id === workflowId)) {
+      setWorkflowId(currentCategoryWorkflows[0].id)
     }
-  }, [category])
+  }, [currentCategoryWorkflows, workflowId])
 
   useEffect(() => {
     setFormError(null)
@@ -3179,9 +3231,7 @@ function GenerateWorkspace() {
       setFormError('Missing required workflow dependencies. Install the missing items listed below and re-check.')
       return
     }
-    const usingTimelineFrame = !!frameForAI?.file && (
-      workflowId === 'wan22-i2v' || workflowId === 'kling-o3-i2v' || workflowId === 'grok-video-i2v' || workflowId === 'vidu-q2-i2v'
-    )
+    const usingTimelineFrame = !!frameForAI?.file && isSingleVideoWorkflowId(workflowId)
     if (currentWorkflow?.needsImage && !selectedAsset && !usingTimelineFrame) {
       setFormError('Please select an input asset or use a timeline frame first')
       return
@@ -3402,7 +3452,7 @@ function GenerateWorkspace() {
                       if (isAudioFilename(info.filename)) return { type: 'audio', ...info }
                       if (isImageFilename(info.filename)) return { type: 'images', items: [{ type: 'image', ...info }] }
                       // Unknown extension - assume video for video workflows
-                      if (['wan22-i2v', 'kling-o3-i2v', 'grok-video-i2v', 'vidu-q2-i2v'].includes(wfId)) return { type: 'video', ...info }
+                      if (isSingleVideoWorkflowId(wfId)) return { type: 'video', ...info }
                       return { type: 'images', items: [{ type: 'image', ...info }] }
                     }
                   }
@@ -3608,7 +3658,7 @@ function GenerateWorkspace() {
       let referenceFilenames = []
       const outputToken = String(job.id || Date.now()).replace(/[^a-zA-Z0-9_-]/g, '_')
       const outputPrefix = (
-        job.workflowId === 'wan22-i2v' || job.workflowId === 'kling-o3-i2v' || job.workflowId === 'grok-video-i2v' || job.workflowId === 'vidu-q2-i2v'
+        isSingleVideoWorkflowId(job.workflowId)
           ? `video/director_${outputToken}`
           : (
             job.workflowId === 'image-edit' ||
@@ -3701,6 +3751,7 @@ function GenerateWorkspace() {
       updateJob(job.id, { status: 'configuring', progress: 30 })
       const {
         modifyWAN22Workflow,
+        modifyLTX23I2VWorkflow,
         modifyMultipleAnglesWorkflow,
         modifyQwenImageEdit2509Workflow,
         modifyZImageTurboWorkflow,
@@ -3727,6 +3778,19 @@ function GenerateWorkspace() {
             seed: job.seed,
             filenamePrefix: outputPrefix || 'video/ComfyStudio_wan',
             qualityPreset: job.wanQualityPreset || 'face-lock',
+          })
+          break
+        case 'ltx23-i2v':
+          modifiedWorkflow = modifyLTX23I2VWorkflow(workflowJson, {
+            prompt: job.prompt,
+            negativePrompt: job.negativePrompt,
+            inputImage: uploadedFilename,
+            width: job.resolution?.width,
+            height: job.resolution?.height,
+            frames: Math.round(job.duration * job.fps) + 1,
+            fps: job.fps,
+            seed: job.seed,
+            filenamePrefix: outputPrefix || 'video/ltx23_i2v',
           })
           break
         case 'kling-o3-i2v':
@@ -4038,7 +4102,7 @@ function GenerateWorkspace() {
                       {frameForAI.mode === 'extend' ? 'Extend with AI' : 'Starting keyframe for AI'}
                     </div>
                     <div className="text-[10px] text-sf-text-muted mt-0.5">
-                      Frame from timeline at playhead. Choose a video workflow (WAN 2.2 or Kling O3 Omni) below, then enter prompt and generate.
+                      Frame from timeline at playhead. Choose any video workflow below, then enter a prompt and generate.
                     </div>
                     <div className="flex items-center gap-2 mt-2">
                       <button
@@ -4085,32 +4149,48 @@ function GenerateWorkspace() {
                   {openWorkflowHint && (
                     <div className="mt-1 text-[9px] text-green-400">{openWorkflowHint}</div>
                   )}
-                  <div className="flex gap-2 mt-1">
-                    {(WORKFLOWS[category] || []).map((wf) => {
-                      const isActiveWorkflow = workflowId === wf.id
-                      const tierMeta = getWorkflowTierMeta(wf.id)
-                      const runtimeLabel = formatWorkflowHardwareRuntime(wf.id)
-                      return (
-                        <button
-                          key={wf.id}
-                          onClick={() => setWorkflowId(wf.id)}
-                          className={`flex-1 px-3 py-2 rounded-lg border text-xs transition-colors ${
-                            isActiveWorkflow
-                              ? 'bg-sf-accent/20 border-sf-accent text-sf-accent'
-                              : 'bg-sf-dark-800 border-sf-dark-600 text-sf-text-muted hover:border-sf-dark-500'
-                          }`}
-                        >
-                          <div className="font-medium">{wf.label}</div>
-                          <div className="text-[9px] opacity-70 mt-0.5">{wf.description}</div>
-                          <div className="mt-1 flex items-center justify-between gap-1">
-                            <span className={`px-1.5 py-0.5 rounded border text-[9px] ${tierMeta?.badgeClass || 'border-sf-dark-600 bg-sf-dark-700 text-sf-text-muted'}`}>
-                              {tierMeta?.shortLabel || 'Unknown'}
-                            </span>
-                            <span className="text-[9px] opacity-70 whitespace-nowrap">{runtimeLabel}</span>
+                  <div className="mt-2 space-y-2">
+                    {currentCategoryWorkflowGroups.map((group) => (
+                      <div key={group.id} className="space-y-1">
+                        {currentCategoryWorkflowGroups.length > 1 && (
+                          <div className="flex items-center justify-between gap-2">
+                            <div className="text-[10px] font-medium uppercase tracking-wider text-sf-text-muted">
+                              {group.label}
+                            </div>
+                            <div className="text-[9px] text-sf-text-muted">
+                              {group.helper}
+                            </div>
                           </div>
-                        </button>
-                      )
-                    })}
+                        )}
+                        <div className="flex flex-wrap gap-2">
+                          {group.workflows.map((wf) => {
+                            const isActiveWorkflow = workflowId === wf.id
+                            const tierMeta = getWorkflowTierMeta(wf.id)
+                            const runtimeLabel = formatWorkflowHardwareRuntime(wf.id)
+                            return (
+                              <button
+                                key={wf.id}
+                                onClick={() => setWorkflowId(wf.id)}
+                                className={`min-w-[220px] flex-1 px-3 py-2 rounded-lg border text-xs text-left transition-colors ${
+                                  isActiveWorkflow
+                                    ? 'bg-sf-accent/20 border-sf-accent text-sf-accent'
+                                    : 'bg-sf-dark-800 border-sf-dark-600 text-sf-text-muted hover:border-sf-dark-500'
+                                }`}
+                              >
+                                <div className="font-medium">{wf.label}</div>
+                                <div className="text-[9px] opacity-70 mt-0.5">{wf.description}</div>
+                                <div className="mt-1 flex items-center justify-between gap-1">
+                                  <span className={`px-1.5 py-0.5 rounded border text-[9px] ${tierMeta?.badgeClass || 'border-sf-dark-600 bg-sf-dark-700 text-sf-text-muted'}`}>
+                                    {tierMeta?.shortLabel || 'Unknown'}
+                                  </span>
+                                  <span className="text-[9px] opacity-70 whitespace-nowrap">{runtimeLabel}</span>
+                                </div>
+                              </button>
+                            )
+                          })}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
 
