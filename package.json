@@ -2,6 +2,10 @@
   "name": "comfystudio",
   "version": "0.1.6",
   "description": "AI-Powered Animatic Studio for Pre-Production",
+  "overrides": {
+    "rimraf": "^6.1.3",
+    "glob": "^11.0.1"
+  },
   "main": "electron/main.js",
   "scripts": {
     "dev": "vite",
